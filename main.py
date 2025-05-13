@@ -4,7 +4,7 @@ from config import API_ID, API_HASH, BOT_TOKEN
 class Bot(Client):
     def __init__(self):
         super().__init__(
-            "vj string session bot",
+            "universal_video_bot",
             api_id=API_ID,
             api_hash=API_HASH,
             bot_token=BOT_TOKEN,
@@ -16,11 +16,10 @@ class Bot(Client):
     async def start(self):
         await super().start()
         me = await self.get_me()
-        self.username = '@' + me.username
-        print(f"Bot Started Successfully as {self.username} | Powered By @VJ_Botz")
+        print(f"Bot Started as @{me.username}")
 
     async def stop(self, *args):
         await super().stop()
-        print("Bot Stopped. Bye!")
+        print("Bot Stopped.")
 
 Bot().run()
