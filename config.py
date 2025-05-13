@@ -18,3 +18,7 @@ MONGO_DB_URI = environ.get("MONGO_DB_URI", "mongodb+srv://siamkfah48:siamkfah48@
 
 # Port To Run Web Application 
 PORT = int(environ.get('PORT', 8080))
+
+
+# Telethon Client Setup
+client = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
