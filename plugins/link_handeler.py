@@ -1,55 +1,77 @@
-import telebot
-import yt_dlp
-from telebot import types
 import os
+import math
+import time
+import aiohttp
+import aiofiles
+import mimetypes
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-# Telegram bot token from config.py
-from config import BOT_TOKEN
+# Progress bar function
+async def progress_bar(current, total, message, stage):
+    percent = current * 100 / total if total else 0
+    bar = "█" * int(percent / 10) + "░" * (10 - int(percent / 10))
+    current_mb = current / 1024 / 1024
+    total_mb = total / 1024 / 1024
+    await message.edit_text(
+        f"**{stage}**\n"
+        f"[{bar}] {percent:.2f}%\n"
+        f"**{current_mb:.2f} MB** of **{total_mb:.2f} MB**"
+    )
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Main downloader handler
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def direct_link_handler(client: Client, message: Message):
+    url = message.text.strip()
 
-# Function to download any video link (YouTube, Facebook, TikTok, etc.)
-def download_video(url):
-    ydl_opts = {
-        'format': 'best',
-        'outtmpl': 'downloads/%(title)s.%(ext)s',
-        'noplaylist': True,
-        'progress_hooks': [progress_hook],
-    }
+    if not url.startswith(("http://", "https://")):
+        return await message.reply("Please send a **valid direct download link.**")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info_dict = ydl.extract_info(url, download=True)
-        file_path = 'downloads/' + info_dict['title'] + '.' + info_dict['ext']
-        return file_path
-
-# Progress hook to show download progress
-def progress_hook(d):
-    if d['status'] == 'downloading':
-        percent = d['_percent_str']
-        speed = d['_speed_str']
-        eta = d['_eta_str']
-        print(f"Download Progress: {percent} at {speed} ETA: {eta}")
-
-# Function to handle all social media video links
-@bot.message_handler(regexp=r'^(https?://)(\S+)$')
-def handle_video(message):
-    url = message.text
-    bot.reply_to(message, "Processing your video download, please wait...")
+    processing = await message.reply("**Downloading from the link...**")
 
     try:
-        # Download the video
-        file_path = download_video(url)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return await processing.edit("Failed to fetch the file. Try again.")
 
-        # Send the downloaded file to user
-        with open(file_path, 'rb') as file:
-            bot.send_document(message.chat.id, file, caption="Here is your downloaded video.")
+                total = int(resp.headers.get("Content-Length", 0))
+                content_type = resp.headers.get("Content-Type", "")
+                ext = mimetypes.guess_extension(content_type.split(";")[0]) or ".bin"
+                filename = f"download_{int(time.time())}{ext}"
+                path = f"./downloads/{filename}"
 
-        # Clean up: remove the downloaded file after sending
-        os.remove(file_path)
+                os.makedirs("downloads", exist_ok=True)
+
+                f = await aiofiles.open(path, mode='wb')
+                downloaded = 0
+                chunk_size = 1024 * 64
+                start_time = time.time()
+
+                async for chunk in resp.content.iter_chunked(chunk_size):
+                    await f.write(chunk)
+                    downloaded += len(chunk)
+                    if time.time() - start_time > 2:
+                        start_time = time.time()
+                        await progress_bar(downloaded, total, processing, "Downloading")
+
+                await f.close()
 
     except Exception as e:
-        bot.reply_to(message, f"Failed to download the video. Error: {e}")
+        return await processing.edit(f"Download error: `{e}`")
 
-# Main loop to start the bot
-if __name__ == '__main__':
-    bot.polling()
+    await processing.edit("**Uploading to Telegram...**")
+
+    try:
+        await client.send_video(
+            chat_id=message.chat.id,
+            video=path,
+            caption=f"**Downloaded from:** `{url}`",
+            progress=progress_bar,
+            progress_args=(processing, "Uploading")
+        )
+    except Exception as e:
+        await processing.edit(f"Upload failed: `{e}`")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
