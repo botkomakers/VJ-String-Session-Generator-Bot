@@ -1,46 +1,36 @@
-import aiohttp
-import aiofiles
+import re
 import os
-import time
+import aiohttp
+import asyncio
+import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-async def download_file(url, file_path):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return False
-                f = await aiofiles.open(file_path, mode='wb')
-                async for chunk in resp.content.iter_chunked(1024):
-                    await f.write(chunk)
-                await f.close()
-        return True
-    except Exception as e:
-        print(f"Download error: {e}")
-        return False
+video_regex = re.compile(r'https?://(?:www\.)?(?:youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|instagram\.com|twitter\.com|vimeo\.com|[^ ]+)', re.IGNORECASE)
 
-@Client.on_message(filters.text & filters.private)
-async def handle_link(client, message: Message):
-    url = message.text.strip()
-    if not url.startswith("http"):
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def download_from_link(client, message: Message):
+    url_match = video_regex.search(message.text)
+    if not url_match:
         return
 
-    status = await message.reply("⏳ Downloading file...")
-
-    file_name = f"file_{int(time.time())}.mp4"
-    downloaded = await download_file(url, file_name)
-
-    if not downloaded:
-        return await status.edit("❌ Failed to download the file.")
+    url = url_match.group(0)
+    status = await message.reply("🔍 Processing your link...")
 
     try:
-        await status.edit("⬆️ Uploading file to Telegram...")
-        await message.reply_document(document=file_name, caption="✅ Here's your downloaded file")
-    except Exception as e:
-        print(f"Upload error: {e}")
-        await message.reply("❌ Failed to upload the file.")
-    finally:
-        if os.path.exists(file_name):
-            os.remove(file_name)
+        ydl_opts = {
+            "outtmpl": "downloads/%(title).70s.%(ext)s",
+            "format": "bestvideo+bestaudio/best",
+            "quiet": True,
+        }
+
+        os.makedirs("downloads", exist_ok=True)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+
+        await message.reply_document(file_path, caption="✅ Here’s your downloaded video")
+        os.remove(file_path)
         await status.delete()
+    except Exception as e:
+        await status.edit(f"❌ Failed: {e}")
