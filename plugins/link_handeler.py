@@ -1,92 +1,62 @@
 import os
-import time
-import mimetypes
-import requests
+import aiohttp
+import asyncio
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from urllib.parse import unquote
 
-THUMBNAIL_URL = "https://i.ibb.co/21RKmKDG/file-1485.jpg"
+THUMB_URL = "https://i.ibb.co/21RKmKDG/file-1485.jpg"
 
-def get_filename_from_url(url):
-    try:
-        filename = unquote(url.split("/")[-1].split("?")[0])
-        if "." in filename:
-            return filename
-    except:
-        pass
-    return None
+async def download_file(url, path):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                with open(path, "wb") as f:
+                    while True:
+                        chunk = await resp.content.read(1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                return True
+    return False
 
-def human_readable_size(size):
-    for unit in ['B','KB','MB','GB','TB']:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
-async def smart_direct_downloader(client, message: Message):
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def direct_video_handler(client, message: Message):
     url = message.text.strip()
-
-    if not url.startswith("http://") and not url.startswith("https://"):
+    if not url.startswith("http"):
+        await message.reply("❌ Invalid link!")
         return
 
     status = await message.reply_photo(
-        photo=THUMBNAIL_URL,
-        caption="⏳ Starting download..."
+        photo=THUMB_URL,
+        caption="⏬ Downloading video, please wait..."
     )
 
-    try:
-        with requests.get(url, stream=True) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("content-length", 0))
-
-            filename = get_filename_from_url(url) or f"file_{int(time.time())}"
-            content_type = r.headers.get("content-type", "")
-            ext = mimetypes.guess_extension(content_type.split(";")[0]) if content_type else None
-
-            if ext and not filename.endswith(ext):
-                filename += ext
-            elif not os.path.splitext(filename)[1]:
-                filename += ".bin"
-
-            downloaded = 0
-            last_percent = -1
-
-            with open(filename, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-
-                        if total:
-                            percent = int(downloaded * 100 / total)
-                            if percent % 5 == 0 and percent != last_percent:
-                                await status.edit_caption(
-                                    f"⏬ Downloading: {percent}%\n"
-                                    f"📦 Size: {human_readable_size(downloaded)} / {human_readable_size(total)}"
-                                )
-                                last_percent = percent
-    except Exception as e:
-        print(f"Download Error: {e}")
-        return await status.edit_caption("❌ Failed to download the file.")
+    os.makedirs("downloads", exist_ok=True)
+    raw_path = "downloads/input.mkv"
+    mp4_path = "downloads/converted.mp4"
 
     try:
-        await status.edit_caption("⬆️ Uploading to Telegram...")
-        if filename.lower().endswith((".mp4", ".mkv", ".mov", ".webm")):
-            await message.reply_video(
-                video=filename,
-                thumb=THUMBNAIL_URL,
-                caption="✅ Here’s your video"
-            )
-        else:
-            await message.reply_document(
-                document=filename,
-                caption="✅ Here’s your file"
-            )
+        ok = await download_file(url, raw_path)
+        if not ok:
+            return await status.edit_caption("❌ Failed to download the file.")
+
+        # Convert to MP4
+        convert_cmd = f'ffmpeg -i "{raw_path}" -c:v libx264 -c:a aac -strict experimental "{mp4_path}" -y'
+        subprocess.run(convert_cmd, shell=True)
+
+        await status.edit_caption("⬆️ Uploading as video...")
+
+        await message.reply_video(
+            video=mp4_path,
+            caption="✅ Here is your converted video!",
+            thumb=THUMB_URL,
+            supports_streaming=True
+        )
     except Exception as e:
-        print(f"Upload Error: {e}")
-        await message.reply("❌ Failed to upload the file.")
+        await message.reply(f"❌ Error: {str(e)}")
     finally:
-        if os.path.exists(filename):
-            os.remove(filename)
         await status.delete()
+        for f in [raw_path, mp4_path]:
+            if os.path.exists(f):
+                os.remove(f)
