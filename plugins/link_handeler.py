@@ -2,7 +2,7 @@ import os
 import yt_dlp
 from telethon import events
 from telethon.tl.custom import Button
-from config import client  # Assuming 'client' is defined in your config.py
+from pyrogram import Client
 
 # Function to download video from YouTube
 def download_video(url, format_choice):
