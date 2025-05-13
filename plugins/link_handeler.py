@@ -7,7 +7,7 @@ from pyrogram.types import Message
 from plugins.utils import progress_bar
 from config import temp
 
-@Client.on_message(filters.text & ~filters.edited)
+@Client.on_message(filters.text)
 async def direct_link_handler(client: Client, message: Message):
     url = message.text.strip()
     if not url.startswith("http"):
