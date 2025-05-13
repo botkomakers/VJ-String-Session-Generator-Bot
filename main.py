@@ -2,13 +2,12 @@ import os
 import time
 import yt_dlp
 from pyrogram import Client, filters
+from pyrogram.handlers import MessageHandler
 from pyrogram.types import Message
 from config import API_ID, API_HASH, BOT_TOKEN
 
-# Supported video platforms
 VIDEO_SITES = ["youtube.com", "youtu.be", "facebook.com", "fb.watch", "tiktok.com", "instagram.com", "vimeo.com"]
 
-# Check if a link is a supported video
 def is_video_link(url: str) -> bool:
     return any(domain in url.lower() for domain in VIDEO_SITES)
 
@@ -29,8 +28,8 @@ class Bot(Client):
         self.username = '@' + me.username
         print(f"Bot Started Successfully as {self.username} | Powered By @VJ_Botz")
 
-        # Register the message handler
-        self.add_handler(filters.private & filters.text, self.auto_video_downloader)
+        # Add handler correctly
+        self.add_handler(MessageHandler(self.auto_video_downloader, filters.private & filters.text))
 
     async def stop(self, *args):
         await super().stop()
