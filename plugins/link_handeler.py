@@ -1,67 +1,48 @@
 import os
-import aiohttp
-import aiofiles
-import mimetypes
-from urllib.parse import unquote
+import time
+import asyncio
+import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from plugins.utils import progress_bar
-from config import temp
 
-@Client.on_message(filters.text & ~filters.forwarded)
-async def direct_link_handler(client: Client, message: Message):
-    url = message.text.strip()
-    if not url.startswith("http"):
+# -------------------- Auto Link Detector --------------------
+@Client.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
+async def auto_direct_link_handler(client, message: Message):
+    text = message.text.strip()
+
+    # Auto detect direct URL (basic pattern)
+    if not text.startswith("http://") and not text.startswith("https://"):
         return
 
-    if not any(url.lower().endswith(ext) for ext in [".mp4", ".mkv", ".mov", ".avi", ".webm"]):
-        return
+    # Optional: add more checks if needed (e.g., file extensions or headers)
+
+    status = await message.reply("⏳ Downloading file...")
 
     try:
-        msg = await message.reply("**Processing your link...**")
-
-        filename = url.split("/")[-1].split("?")[0]
-        filename = filename if "." in filename else "video.mp4"
-        filename = unquote(filename)  # Decode %20 etc.
-        os.makedirs(temp.DOWNLOAD_DIR, exist_ok=True)
-        filepath = f"{temp.DOWNLOAD_DIR}/{filename}"
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return await msg.edit("**Failed to download file. Invalid or expired link.**")
-
-                total = int(resp.headers.get("Content-Length", 0))
-                downloaded = 0
-                chunk_size = 1024 * 1024  # 1MB
-
-                async with aiofiles.open(filepath, mode='wb') as f:
-                    async for chunk in resp.content.iter_chunked(chunk_size):
-                        await f.write(chunk)
-                        downloaded += len(chunk)
-                        await progress_bar(
-                            current=downloaded,
-                            total=total,
-                            message=msg,
-                            start_text="**Downloading...**",
-                            suffix="video"
-                        )
-
-        mime_type, _ = mimetypes.guess_type(filepath)
-        mime_type = mime_type or "video/mp4"
-
-        await msg.edit("**Uploading to Telegram...**")
-
-        await message.reply_video(
-            video=filepath,
-            caption=f"**Downloaded from:** `{url}`",
-            supports_streaming=True
-        )
-        await msg.delete()
-
+        file_name = f"file_{int(time.time())}.bin"
+        with requests.get(text, stream=True) as r:
+            r.raise_for_status()
+            content_type = r.headers.get("content-type", "")
+            ext = content_type.split("/")[-1].split(";")[0] if "/" in content_type else "bin"
+            file_name = f"file_{int(time.time())}.{ext}"
+            with open(file_name, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
     except Exception as e:
-        await msg.edit(f"**Error:** `{str(e)}`")
+        print(f"Download Error: {e}")
+        return await status.edit("❌ Failed to download the file.")
 
+    try:
+        await status.edit("⬆️ Uploading file to Telegram...")
+        await message.reply_document(
+            document=file_name,
+            caption="✅ Here's your downloaded file"
+        )
+    except Exception as e:
+        print(f"Upload Error: {e}")
+        await message.reply("❌ Failed to upload the file.")
     finally:
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        if os.path.exists(file_name):
+            os.remove(file_name)
+        await status.delete()
