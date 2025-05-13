@@ -2,12 +2,13 @@ import os
 import aiohttp
 import aiofiles
 import mimetypes
+from urllib.parse import unquote
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from plugins.utils import progress_bar
 from config import temp
 
-@Client.on_message(filters.text)
+@Client.on_message(filters.text & ~filters.forwarded)
 async def direct_link_handler(client: Client, message: Message):
     url = message.text.strip()
     if not url.startswith("http"):
@@ -21,16 +22,18 @@ async def direct_link_handler(client: Client, message: Message):
 
         filename = url.split("/")[-1].split("?")[0]
         filename = filename if "." in filename else "video.mp4"
+        filename = unquote(filename)  # Decode %20 etc.
+        os.makedirs(temp.DOWNLOAD_DIR, exist_ok=True)
         filepath = f"{temp.DOWNLOAD_DIR}/{filename}"
 
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    return await msg.edit("**Failed to download file. Invalid link or expired.**")
+                    return await msg.edit("**Failed to download file. Invalid or expired link.**")
 
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
-                chunk_size = 1024 * 1024
+                chunk_size = 1024 * 1024  # 1MB
 
                 async with aiofiles.open(filepath, mode='wb') as f:
                     async for chunk in resp.content.iter_chunked(chunk_size):
