@@ -3,15 +3,20 @@ import time
 import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import math
+import mimetypes
 
-# ✅ প্রগ্রেস বার জেনারেটর ফাংশন
+# ✅ প্রগ্রেস বার ফাংশন
 def progress_bar(current, total, prefix):
     percent = current * 100 / total
     bar_length = 10
-    filled_length = int(bar_length * percent / 100)
-    bar = '■' * filled_length + '▩' + '□' * (bar_length - filled_length - 1)
+    filled = int(bar_length * percent / 100)
+    bar = '■' * filled + '▩' + '□' * (bar_length - filled - 1)
     return f"{prefix}: {int(percent)}%\n{bar}"
+
+# ✅ ভিডিও হলে True রিটার্ন করবে
+def is_video(file_path):
+    mime = mimetypes.guess_type(file_path)[0]
+    return mime and mime.startswith("video")
 
 # ✅ /direct কমান্ড হ্যান্ডলার
 @Client.on_message(filters.command("direct") & filters.private)
@@ -27,7 +32,7 @@ async def auto_direct_handler(client, message: Message):
     url = message.text.strip()
     await handle_direct_download(client, message, url)
 
-# ✅ মেইন হ্যান্ডলার
+# ✅ মূল ডাউনলোড এবং আপলোড হ্যান্ডলার
 async def handle_direct_download(client, message: Message, url: str):
     status = await message.reply("⏳ Starting download...")
 
@@ -46,8 +51,6 @@ async def handle_direct_download(client, message: Message, url: str):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-
-                        # প্রতি 1 সেকেন্ড পরপর আপডেট
                         if time.time() - last_update > 1:
                             prog = progress_bar(downloaded, total, "Downloading")
                             await status.edit(prog)
@@ -59,19 +62,26 @@ async def handle_direct_download(client, message: Message, url: str):
     try:
         await status.edit("⬆️ Preparing to upload...")
 
-        # ✅ Upload with progress bar
         async def progress(current, total):
             prog = progress_bar(current, total, "Sending")
             try:
                 await status.edit(prog)
             except:
-                pass  # Prevent flood errors
+                pass
 
-        await message.reply_document(
-            document=file_name,
-            caption="✅ Here's your downloaded file",
-            progress=progress
-        )
+        if is_video(file_name):
+            await message.reply_video(
+                video=file_name,
+                caption="✅ Here's your downloaded video",
+                supports_streaming=True,
+                progress=progress
+            )
+        else:
+            await message.reply_document(
+                document=file_name,
+                caption="✅ Here's your downloaded file",
+                progress=progress
+            )
     except Exception as e:
         print(f"[Upload Error] {e}")
         await message.reply("❌ Failed to upload the file.")
