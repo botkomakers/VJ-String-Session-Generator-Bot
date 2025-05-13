@@ -1,54 +1,55 @@
-import os
+import telebot
 import yt_dlp
-from telethon import events
-from telethon.tl.custom import Button
-from pyrogram import Client
+from telebot import types
+import os
 
-# Function to download video from YouTube
-def download_video(url, format_choice):
+# Telegram bot token from config.py
+from config import BOT_TOKEN
+
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Function to download any video link (YouTube, Facebook, TikTok, etc.)
+def download_video(url):
     ydl_opts = {
-        'format': format_choice,
-        'outtmpl': './downloads/%(title)s.%(ext)s',  # Download folder
-        'progress_hooks': [progress_hook]
+        'format': 'best',
+        'outtmpl': 'downloads/%(title)s.%(ext)s',
+        'noplaylist': True,
+        'progress_hooks': [progress_hook],
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
 
-# Progress hook to track download progress
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info_dict = ydl.extract_info(url, download=True)
+        file_path = 'downloads/' + info_dict['title'] + '.' + info_dict['ext']
+        return file_path
+
+# Progress hook to show download progress
 def progress_hook(d):
     if d['status'] == 'downloading':
-        print(f"Downloading... {d['filename']} - {d['_percent_str']} at {d['_speed_str']}")
-    elif d['status'] == 'finished':
-        print(f"Download finished: {d['filename']}")
+        percent = d['_percent_str']
+        speed = d['_speed_str']
+        eta = d['_eta_str']
+        print(f"Download Progress: {percent} at {speed} ETA: {eta}")
 
-# Function to get available formats from YouTube link
-def get_video_formats(url):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        formats = info.get('formats', [])
-        return formats
+# Function to handle all social media video links
+@bot.message_handler(regexp=r'^(https?://)(\S+)$')
+def handle_video(message):
+    url = message.text
+    bot.reply_to(message, "Processing your video download, please wait...")
 
-# Handle /start command
-@client.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    await event.respond('Welcome to the Video Downloader Bot! Send me a YouTube link and I will help you download it.')
+    try:
+        # Download the video
+        file_path = download_video(url)
 
-# Handle link detection and processing
-@client.on(events.NewMessage(pattern='https?://'))
-async def handle_links(event):
-    url = event.message.text
-    if 'youtube.com' in url:
-        formats = get_video_formats(url)
-        buttons = []
-        for fmt in formats:
-            button_text = f"{fmt['format_note']} - {fmt['ext']}"
-            buttons.append(Button.url(button_text, fmt['url']))
+        # Send the downloaded file to user
+        with open(file_path, 'rb') as file:
+            bot.send_document(message.chat.id, file, caption="Here is your downloaded video.")
 
-        # Send the formats as buttons
-        await event.respond("Select the format you want to download:", buttons=buttons)
-    else:
-        await event.respond("Unsupported link detected. I can only download videos from YouTube currently.")
+        # Clean up: remove the downloaded file after sending
+        os.remove(file_path)
+
+    except Exception as e:
+        bot.reply_to(message, f"Failed to download the video. Error: {e}")
+
+# Main loop to start the bot
+if __name__ == '__main__':
+    bot.polling()
