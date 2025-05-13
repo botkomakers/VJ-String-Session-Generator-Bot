@@ -6,7 +6,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from urllib.parse import unquote
 
-THUMBNAIL_URL = "https://telegra.ph/file/97fef99b91b457805fd10.jpg"
+THUMBNAIL_URL = "https://i.ibb.co/21RKmKDG/file-1485.jpg"
 
 def get_filename_from_url(url):
     try:
