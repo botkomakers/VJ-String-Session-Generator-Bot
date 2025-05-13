@@ -1,5 +1,8 @@
-buildCommand: |
-  apt-get update
-  apt-get install -y ffmpeg
-  pip install -r requirements.txt
-startCommand: python3 main.py
+services:
+  - type: web
+    name: telegram-downloader-bot
+    env: python
+    region: oregon
+    buildCommand: ./build.sh && pip install -r requirements.txt
+    startCommand: ./start.sh
+    plan: free
