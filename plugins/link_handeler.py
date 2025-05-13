@@ -32,8 +32,8 @@ async def smart_direct_downloader(client, message: Message):
 
     status = await message.reply_photo(
         photo=THUMBNAIL_URL,
-        caption="⏳ **Starting download...**",
-        parse_mode="markdown"
+        caption="⏳ <b>Starting download...</b>",
+        parse_mode="html"
     )
 
     try:
@@ -63,26 +63,29 @@ async def smart_direct_downloader(client, message: Message):
                             percent = int(downloaded * 100 / total)
                             if percent % 5 == 0 and percent != last_percent:
                                 await status.edit_caption(
-                                    f"⏬ **Downloading:** {percent}%\n"
-                                    f"📦 Size: {human_readable_size(downloaded)} / {human_readable_size(total)}"
+                                    f"⏬ <b>Downloading:</b> {percent}%\n"
+                                    f"📦 <b>Size:</b> {human_readable_size(downloaded)} / {human_readable_size(total)}",
+                                    parse_mode="html"
                                 )
                                 last_percent = percent
     except Exception as e:
         print(f"Download Error: {e}")
-        return await status.edit_caption("❌ **Failed to download the file.**")
+        return await status.edit_caption("❌ <b>Failed to download the file.</b>", parse_mode="html")
 
     try:
-        await status.edit_caption("⬆️ **Uploading to Telegram...**")
+        await status.edit_caption("⬆️ <b>Uploading to Telegram...</b>", parse_mode="html")
         if filename.lower().endswith((".mp4", ".mkv", ".mov", ".webm")):
             await message.reply_video(
                 video=filename,
                 thumb=THUMBNAIL_URL,
-                caption="✅ Here's your video"
+                caption="✅ <b>Here’s your video</b>",
+                parse_mode="html"
             )
         else:
             await message.reply_document(
                 document=filename,
-                caption="✅ Here's your file"
+                caption="✅ <b>Here’s your file</b>",
+                parse_mode="html"
             )
     except Exception as e:
         print(f"Upload Error: {e}")
