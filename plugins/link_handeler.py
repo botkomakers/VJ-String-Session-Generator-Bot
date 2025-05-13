@@ -1,11 +1,9 @@
 import os
 import yt_dlp
-from telethon import TelegramClient, events
-from telethon.tl.types import InputWebDocument
+from telethon import events
 from telethon.tl.custom import Button
-from telethon.tl import functions
+from config import client  # Assuming 'client' is defined in your config.py
 
-#থ
 # Function to download video from YouTube
 def download_video(url, format_choice):
     ydl_opts = {
@@ -37,7 +35,7 @@ def get_video_formats(url):
 # Handle /start command
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
-    await event.respond('Welcome to the Video Downloader Bot! Send me a link and I will help you download it.')
+    await event.respond('Welcome to the Video Downloader Bot! Send me a YouTube link and I will help you download it.')
 
 # Handle link detection and processing
 @client.on(events.NewMessage(pattern='https?://'))
@@ -49,12 +47,8 @@ async def handle_links(event):
         for fmt in formats:
             button_text = f"{fmt['format_note']} - {fmt['ext']}"
             buttons.append(Button.url(button_text, fmt['url']))
-        
+
         # Send the formats as buttons
         await event.respond("Select the format you want to download:", buttons=buttons)
     else:
         await event.respond("Unsupported link detected. I can only download videos from YouTube currently.")
-
-# Start the bot
-client.start(bot_token=BOT_TOKEN)
-client.run_until_disconnected()
