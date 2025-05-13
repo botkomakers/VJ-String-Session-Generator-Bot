@@ -1,1 +1,4 @@
-# Empty file to make TechVJ a module
+import os
+
+class temp:
+    DOWNLOAD_DIR = "./downloads"
