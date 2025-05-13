@@ -19,3 +19,14 @@ MONGO_DB_URI = environ.get("MONGO_DB_URI", "mongodb+srv://siamkfah48:siamkfah48@
 # Port To Run Web Application 
 PORT = int(environ.get('PORT', 8080))
 
+
+import os
+
+class temp:
+    DOWNLOAD_DIR = "./downloads"
+
+
+
+
+
+
