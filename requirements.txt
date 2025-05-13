@@ -11,3 +11,6 @@ Jinja2==3.0.3
 werkzeug==2.0.2
 itsdangerous==2.0.1
 yt-dlp
+pyrogram==2.0.106
+tgcrypto==1.2.5
+requests
