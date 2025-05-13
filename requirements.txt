@@ -16,3 +16,4 @@ tgcrypto==1.2.5
 requests
 aiohttp
 aiofiles
+pyTelegramBotAPI==4.9.0
