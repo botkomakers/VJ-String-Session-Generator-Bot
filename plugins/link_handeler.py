@@ -1,73 +1,81 @@
 import os
-import aiohttp
-import aiofiles
+import time
+import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from utils.progress import progress_bar
-import mimetypes
-import re
-from time import time
+import math
 
-@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
-async def direct_link_handler(client: Client, message: Message):
+# ✅ প্রগ্রেস বার জেনারেটর ফাংশন
+def progress_bar(current, total, prefix):
+    percent = current * 100 / total
+    bar_length = 10
+    filled_length = int(bar_length * percent / 100)
+    bar = '■' * filled_length + '▩' + '□' * (bar_length - filled_length - 1)
+    return f"{prefix}: {int(percent)}%\n{bar}"
+
+# ✅ /direct কমান্ড হ্যান্ডলার
+@Client.on_message(filters.command("direct") & filters.private)
+async def direct_link_handler(client, message: Message):
+    url = ' '.join(message.command[1:])
+    if not url.startswith("http"):
+        return await message.reply("❌ Usage: `/direct [Download URL]`", parse_mode="markdown")
+    await handle_direct_download(client, message, url)
+
+# ✅ সরাসরি লিংক হ্যান্ডলার (auto detection)
+@Client.on_message(filters.private & filters.text & filters.regex(r'^https?://'))
+async def auto_direct_handler(client, message: Message):
     url = message.text.strip()
+    await handle_direct_download(client, message, url)
 
-    if not url.startswith(("http://", "https://")):
-        return await message.reply("Please send a valid direct download link.")
-
-    processing = await message.reply("**Fetching the file...**")
+# ✅ মেইন হ্যান্ডলার
+async def handle_direct_download(client, message: Message, url: str):
+    status = await message.reply("⏳ Starting download...")
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        }
+        ext = url.split('?')[0].split('.')[-1][:4]
+        file_name = f"file_{int(time.time())}.{ext if ext.isalnum() else 'bin'}"
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200 or resp.content_type.startswith("text"):
-                    return await processing.edit("**Failed to fetch the file. Not a direct downloadable video link.**")
+        with requests.get(url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            total = int(r.headers.get('Content-Length', 0))
+            downloaded = 0
+            last_update = time.time()
 
-                total = int(resp.headers.get("Content-Length", 0))
-                content_type = resp.headers.get("Content-Type", "")
-                ext = mimetypes.guess_extension(content_type.split(";")[0]) or ""
+            with open(file_name, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=1024 * 512):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
 
-                if not ext or ext in [".html", ".htm", ".txt"]:
-                    ext = ".mp4"  # fallback
-
-                filename = f"video_{int(time())}{ext}"
-                path = f"./downloads/{filename}"
-
-                os.makedirs("downloads", exist_ok=True)
-
-                f = await aiofiles.open(path, mode='wb')
-                downloaded = 0
-                chunk_size = 1024 * 64
-                start = time()
-
-                async for chunk in resp.content.iter_chunked(chunk_size):
-                    await f.write(chunk)
-                    downloaded += len(chunk)
-                    if time() - start > 2:
-                        start = time()
-                        await progress_bar(downloaded, total, processing, "Downloading")
-
-                await f.close()
-
+                        # প্রতি 1 সেকেন্ড পরপর আপডেট
+                        if time.time() - last_update > 1:
+                            prog = progress_bar(downloaded, total, "Downloading")
+                            await status.edit(prog)
+                            last_update = time.time()
     except Exception as e:
-        return await processing.edit(f"**Error while downloading:** `{e}`")
-
-    await processing.edit("**Uploading to Telegram...**")
+        print(f"[Download Error] {e}")
+        return await status.edit("❌ Failed to download the file. Invalid or unsupported link.")
 
     try:
-        await client.send_video(
-            chat_id=message.chat.id,
-            video=path,
-            caption=f"**Downloaded from:** `{url}`",
-            progress=progress_bar,
-            progress_args=(processing, "Uploading")
+        await status.edit("⬆️ Preparing to upload...")
+
+        # ✅ Upload with progress bar
+        async def progress(current, total):
+            prog = progress_bar(current, total, "Sending")
+            try:
+                await status.edit(prog)
+            except:
+                pass  # Prevent flood errors
+
+        await message.reply_document(
+            document=file_name,
+            caption="✅ Here's your downloaded file",
+            progress=progress
         )
     except Exception as e:
-        await processing.edit(f"**Upload failed:** `{e}`")
+        print(f"[Upload Error] {e}")
+        await message.reply("❌ Failed to upload the file.")
     finally:
-        if os.path.exists(path):
-            os.remove(path)
+        if os.path.exists(file_name):
+            os.remove(file_name)
+        await status.delete()
