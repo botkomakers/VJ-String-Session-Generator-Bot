@@ -6,7 +6,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from urllib.parse import unquote
 
-THUMBNAIL_URL = "https://i.ibb.co/21RKmKDG/file-1485.jpg"
+THUMBNAIL_URL = "https://telegra.ph/file/97fef99b91b457805fd10.jpg"
 
 def get_filename_from_url(url):
     try:
@@ -32,8 +32,7 @@ async def smart_direct_downloader(client, message: Message):
 
     status = await message.reply_photo(
         photo=THUMBNAIL_URL,
-        caption="⏳ <b>Starting download...</b>",
-        parse_mode="html"
+        caption="⏳ Starting download..."
     )
 
     try:
@@ -63,29 +62,26 @@ async def smart_direct_downloader(client, message: Message):
                             percent = int(downloaded * 100 / total)
                             if percent % 5 == 0 and percent != last_percent:
                                 await status.edit_caption(
-                                    f"⏬ <b>Downloading:</b> {percent}%\n"
-                                    f"📦 <b>Size:</b> {human_readable_size(downloaded)} / {human_readable_size(total)}",
-                                    parse_mode="html"
+                                    f"⏬ Downloading: {percent}%\n"
+                                    f"📦 Size: {human_readable_size(downloaded)} / {human_readable_size(total)}"
                                 )
                                 last_percent = percent
     except Exception as e:
         print(f"Download Error: {e}")
-        return await status.edit_caption("❌ <b>Failed to download the file.</b>", parse_mode="html")
+        return await status.edit_caption("❌ Failed to download the file.")
 
     try:
-        await status.edit_caption("⬆️ <b>Uploading to Telegram...</b>", parse_mode="html")
+        await status.edit_caption("⬆️ Uploading to Telegram...")
         if filename.lower().endswith((".mp4", ".mkv", ".mov", ".webm")):
             await message.reply_video(
                 video=filename,
                 thumb=THUMBNAIL_URL,
-                caption="✅ <b>Here’s your video</b>",
-                parse_mode="html"
+                caption="✅ Here’s your video"
             )
         else:
             await message.reply_document(
                 document=filename,
-                caption="✅ <b>Here’s your file</b>",
-                parse_mode="html"
+                caption="✅ Here’s your file"
             )
     except Exception as e:
         print(f"Upload Error: {e}")
