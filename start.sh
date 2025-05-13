@@ -1,9 +1,8 @@
 #!/bin/bash
 
-echo "Starting Bot..."
+mkdir -p bin
+curl -L -o bin/ffmpeg https://ffmpeg-binaries.vercel.app/ffmpeg
+chmod +x bin/ffmpeg
+export PATH=$PATH:$(pwd)/bin
 
-# Make sure ffmpeg is installed
-apt update && apt install -y ffmpeg
-
-# Run your bot
 python3 main.py
