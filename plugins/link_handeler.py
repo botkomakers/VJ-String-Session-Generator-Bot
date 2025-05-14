@@ -9,16 +9,16 @@ from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 from urllib.parse import urlparse
 
-# সাপোর্টেড ভিডিও ফরম্যাট
+# সমর্থিত ভিডিও এক্সটেনশন
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-# এক্সটেনশন বের করা
+# ইউআরএল থেকে এক্সটেনশন বের করা
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext else ".bin"
 
-# ভিডিও বা ফাইল ডাউনলোড করা
+# ফাইল ডাউনলোড করা
 async def download_file(url, filename):
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -33,7 +33,7 @@ async def download_file(url, filename):
                     f.write(chunk)
     return filename
 
-# ভিডিওর metadata বের করা
+# ভিডিওর মেটাডেটা বের করা
 def extract_metadata(file_path):
     try:
         cmd = [
@@ -45,16 +45,16 @@ def extract_metadata(file_path):
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
         if "streams" not in data or not data["streams"]:
-            return 0, 0, 0
+            return 0.0, 0, 0
         stream = data["streams"][0]
-        duration = float(stream.get("duration", "0") or 0)
+        duration = float(stream.get("duration") or 0.0)
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
         return duration, width, height
     except Exception:
-        return 0, 0, 0
+        return 0.0, 0, 0
 
-# থাম্বনেইল জেনারেট করা
+# থাম্বনেইল তৈরি করা
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         subprocess.run(
@@ -65,7 +65,7 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-# মেইন হ্যান্ডলার
+# হ্যান্ডলার
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_link_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
@@ -95,10 +95,13 @@ async def direct_link_handler(bot: Client, message: Message):
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
+                # duration অবশ্যই float বা int হতে হবে
+                duration = float(duration) if duration else 0.0
+
                 await message.reply_video(
                     video=filename,
                     caption=caption,
-                    duration=int(duration) if duration else None,
+                    duration=round(duration),
                     width=width or None,
                     height=height or None,
                     thumb=thumb if thumb else None
