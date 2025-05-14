@@ -10,14 +10,24 @@ from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 from urllib.parse import urlparse
-from config import LOG_CHANNEL  # Ensure LOG_CHANNEL is set in config.py
+from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+SUPPORTED_DOMAINS = [
+    "youtube.com", "youtu.be", "facebook.com", "fb.watch",
+    "tiktok.com", "instagram.com", "twitter.com", "vimeo.com",
+    "reddit.com", "dailymotion.com"
+]
 
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext else ".bin"
+
+def is_supported_link(url):
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower().replace("www.", "")
+    return any(s in domain for s in SUPPORTED_DOMAINS)
 
 async def download_file(url, filename):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -95,14 +105,14 @@ async def direct_link_handler(bot: Client, message: Message):
 
     valid_urls = []
     for url in urls:
-        if url.lower().startswith("http"):
+        if url.lower().startswith("http") and is_supported_link(url):
             ext = get_extension_from_url(url)
             valid_urls.append((url, ext))
 
     if not valid_urls:
-        return await notice.edit("No valid downloadable links found.")
+        return await notice.edit("No supported or valid links found.")
 
-    await notice.edit(f"Found {len(valid_urls)} file(s). Starting download...")
+    await notice.edit(f"Found {len(valid_urls)} supported file(s). Starting download...")
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
         filename = f"/tmp/file_{index}{ext}"
@@ -133,11 +143,15 @@ async def direct_link_handler(bot: Client, message: Message):
                     video_kwargs["thumb"] = thumb
 
                 await downloading.delete()
-                await message.reply_video(**video_kwargs)
+                uploading = await message.reply_text("**Uploading... Please wait.**")
+                sent_msg = await message.reply_video(**video_kwargs)
+                await uploading.delete()
 
             else:
                 await downloading.delete()
-                await message.reply_document(document=filename, caption=caption)
+                uploading = await message.reply_text("**Uploading... Please wait.**")
+                sent_msg = await message.reply_document(document=filename, caption=caption)
+                await uploading.delete()
 
             # Send log to LOG_CHANNEL
             if os.path.exists(filename):
