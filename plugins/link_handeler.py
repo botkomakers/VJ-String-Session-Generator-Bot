@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import time
 
 # MongoDB কনফিগারেশন
-client = MongoClient(os.getenv("MONGO_DB_URI", "mongodb://localhost:27017"))
+client = MongoClient(os.getenv("MONGO_DB_URI", "mongodb+srv://siamkfah48:siamkfah48@cluster0.fbodc0r.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"))
 db = client['video_downloader']
 rate_limit_collection = db['rate_limit']
 lock_collection = db['locks']
