@@ -4,10 +4,13 @@ import asyncio
 import traceback
 import subprocess
 import json
+import time
+import datetime
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 from urllib.parse import urlparse
+from config import LOG_CHANNEL  # Ensure LOG_CHANNEL is set in config.py
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
@@ -60,6 +63,27 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
+def format_bytes(size):
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
+
+async def auto_cleanup(path="/tmp", max_age=180):
+    now = time.time()
+    for filename in os.listdir(path):
+        file_path = os.path.join(path, filename)
+        if os.path.isfile(file_path):
+            age = now - os.path.getmtime(file_path)
+            if age > max_age:
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_link_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
@@ -83,7 +107,7 @@ async def direct_link_handler(bot: Client, message: Message):
     for index, (url, ext) in enumerate(valid_urls, start=1):
         filename = f"/tmp/file_{index}{ext}"
         try:
-            await notice.delete()  # Delete message to reduce edits
+            await notice.delete()
             downloading = await message.reply_text(f"**Downloading:**\n{url}")
             await download_file(url, filename)
 
@@ -115,6 +139,24 @@ async def direct_link_handler(bot: Client, message: Message):
                 await downloading.delete()
                 await message.reply_document(document=filename, caption=caption)
 
+            # Send log to LOG_CHANNEL
+            if os.path.exists(filename):
+                file_size = format_bytes(os.path.getsize(filename))
+                user = message.from_user
+                log_text = (
+                    f"**New Download Event**\n\n"
+                    f"**User:** {user.mention} (`{user.id}`)\n"
+                    f"**Link:** `{url}`\n"
+                    f"**File Name:** `{os.path.basename(filename)}`\n"
+                    f"**Size:** `{file_size}`\n"
+                    f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                    f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+                )
+                try:
+                    await bot.send_message(LOG_CHANNEL, log_text)
+                except Exception:
+                    pass
+
         except FloodWait as e:
             await asyncio.sleep(e.value)
             continue
@@ -122,7 +164,11 @@ async def direct_link_handler(bot: Client, message: Message):
             traceback.print_exc()
             await message.reply_text(f"❌ Error with `{url}`\n\n**{e}**")
         finally:
-            if os.path.exists(filename):
-                os.remove(filename)
-            if os.path.exists("/tmp/thumb.jpg"):
-                os.remove("/tmp/thumb.jpg")
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
+                await auto_cleanup()
+            except:
+                pass
