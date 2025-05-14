@@ -7,60 +7,114 @@ import json
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from urllib.parse import urlparse
-from collections import defaultdict
-import aioredis
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+from config import MONGO_DB_URI  # Import MongoDB URI from config
+
+# MongoDB কনফিগারেশন
+client = MongoClient(MONGO_DB_URI)  # Using URI from config.py
+db = client['video_downloader']
+rate_limit_collection = db['rate_limit']
+lock_collection = db['locks']
+task_collection = db['tasks']
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-# Redis Init
-redis = None
-
-async def init_redis():
-    global redis
-    redis = await aioredis.from_url("redis://localhost")
-
-# Rate limiter
+# Rate limiting ফাংশন
 async def is_rate_limited(user_id: int, limit: int = 1, window: int = 60):
-    key = f"rate_limit:{user_id}"
-    current = await redis.get(key)
-    if current and int(current) >= limit:
-        return True
-    else:
-        await redis.incr(key)
-        await redis.expire(key, window)
+    current_time = datetime.utcnow()
+    user_data = rate_limit_collection.find_one({"user_id": user_id})
+    
+    if not user_data:
+        # যদি ইউজারের ডেটা না থাকে, নতুন রেকর্ড তৈরি
+        rate_limit_collection.insert_one({
+            "user_id": user_id,
+            "last_request_time": current_time,
+            "request_count": 1,
+            "expires_at": current_time + timedelta(seconds=window)
+        })
         return False
 
-# Lock system
+    # চেক করা হচ্ছে কিভাবে লিমিট পরবর্তীতে রেট লিমিটেড হতে পারে
+    time_difference = current_time - user_data['last_request_time']
+    if time_difference < timedelta(seconds=window):
+        # যদি রেট লিমিট ছাড়িয়ে যায়
+        if user_data['request_count'] >= limit:
+            return True
+        else:
+            # রিকোয়েস্ট বাড়ানো
+            rate_limit_collection.update_one(
+                {"user_id": user_id},
+                {"$inc": {"request_count": 1}},
+                upsert=True
+            )
+            return False
+    else:
+        # নতুন রিকোয়েস্টে সময় পুনরায় সেট
+        rate_limit_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"last_request_time": current_time, "request_count": 1}},
+            upsert=True
+        )
+        return False
+
+# Lock সিস্টেম ফাংশন
 async def acquire_lock(user_id, ttl=30):
     key = f"user_lock:{user_id}"
-    if await redis.setnx(key, "locked"):
-        await redis.expire(key, ttl)
-        return True
-    return False
+    current_time = datetime.utcnow()
+    lock_expiry = current_time + timedelta(seconds=ttl)
+
+    lock_data = {
+        "user_id": user_id,
+        "lock_expiry": lock_expiry
+    }
+
+    result = lock_collection.find_one_and_update(
+        {"user_id": user_id},
+        {"$setOnInsert": lock_data},
+        upsert=True
+    )
+
+    if result and result.get("lock_expiry", 0) > current_time:
+        return False  # Lock already acquired
+    
+    lock_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"lock_expiry": lock_expiry}}
+    )
+    return True
 
 async def release_lock(user_id):
-    await redis.delete(f"user_lock:{user_id}")
+    lock_collection.delete_one({"user_id": user_id})
 
-# Task queue system
-user_queues = defaultdict(asyncio.Queue)
-
+# Task Queue সিস্টেম
 async def queue_task(user_id, coro):
-    q = user_queues[user_id]
-    await q.put(coro)
-    if q.qsize() == 1:
-        await process_user_queue(user_id)
+    task_data = {
+        "user_id": user_id,
+        "task_id": f"task_{user_id}_{time.time()}",
+        "status": "pending",
+        "created_at": datetime.utcnow()
+    }
+    task_collection.insert_one(task_data)
+    await process_user_queue(user_id, coro)
 
-async def process_user_queue(user_id):
-    q = user_queues[user_id]
-    while not q.empty():
-        coro = await q.get()
+async def process_user_queue(user_id, coro):
+    task_data = task_collection.find_one({"user_id": user_id, "status": "pending"})
+    if task_data:
         try:
             await coro
+            task_collection.update_one(
+                {"_id": task_data["_id"]},
+                {"$set": {"status": "completed"}}
+            )
         except Exception as e:
-            print("Task error:", e)
-        q.task_done()
+            print(f"Error processing task: {e}")
+            task_collection.update_one(
+                {"_id": task_data["_id"]},
+                {"$set": {"status": "failed"}}
+            )
 
-# Utilities
+# ইউটিলিটি ফাংশনস
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
@@ -83,9 +137,7 @@ async def download_file(url, filename):
 def extract_metadata(file_path):
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,duration",
-            "-of", "json", file_path
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,duration", "-of", "json", file_path
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
@@ -109,16 +161,17 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
+# Pyrogram Client সেটআপ
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_link_handler(bot: Client, message: Message):
     user_id = message.from_user.id
 
-    await init_redis()
     if await is_rate_limited(user_id):
         return await message.reply_text("Too many requests. Please wait a bit.")
 
     await queue_task(user_id, process_download(bot, message))
 
+# ডাউনলোড প্রসেস ফাংশন
 async def process_download(bot: Client, message: Message):
     user_id = message.from_user.id
     urls = message.text.strip().split()
