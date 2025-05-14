@@ -5,23 +5,19 @@ import traceback
 import datetime
 import time
 import yt_dlp
-import subprocess
-
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-
-from config import LOG_CHANNEL, COOKIE_FILE
+from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-def download_with_ytdlp(url, download_dir="/tmp", cookie_file=COOKIE_FILE):
+def download_with_ytdlp(url, download_dir="/tmp", format_type="best[ext=mp4]/best"):
     ydl_opts = {
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
+        "format": format_type,
         "quiet": True,
         "no_warnings": True,
-        "cookiefile": cookie_file if os.path.exists(cookie_file) else None,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -39,6 +35,7 @@ def format_bytes(size):
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
+        import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
@@ -71,44 +68,71 @@ async def auto_download_handler(bot: Client, message: Message):
 
     valid_urls = [url for url in urls if url.lower().startswith("http")]
     if not valid_urls:
-        return await notice.edit("No valid links detected.")
+        return await notice.delete()
 
-    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
-
+    await notice.delete()
     for url in valid_urls:
         try:
-            await notice.delete()
-            processing = await message.reply_text(f"**Processing:**\n{url}")
-            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
+            # User selects whether to download audio or video
+            if "youtube" in url.lower() or "facebook" in url.lower():
+                await message.reply_text("Please select download type: \n1. Video\n2. Audio")
+                reply = await bot.listen(message.chat.id)
+                choice = reply.text.strip()
+
+                format_type = "best[ext=mp4]/best" if choice == "1" else "bestaudio"
+            else:
+                format_type = "best[ext=mp4]/best"  # Direct links just download video
+
+            # Start downloading
+            processing = await message.reply_text(f"Downloading from:\n{url}")
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url, format_type=format_type)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
 
             ext = os.path.splitext(filepath)[1]
             caption = f"**Downloaded from:**\n{url}"
-            thumb = generate_thumbnail(filepath)
 
-            # Upload to user
-            sent_msg = None
             if ext.lower() in VIDEO_EXTENSIONS:
-                await processing.edit("Uploading video...")
+                thumb = generate_thumbnail(filepath)
                 sent_msg = await message.reply_video(
                     video=filepath,
                     caption=caption,
                     thumb=thumb if thumb else None
                 )
+                # Forward the video to the log channel with user details
+                try:
+                    await bot.copy_message(
+                        chat_id=LOG_CHANNEL,
+                        from_chat_id=sent_msg.chat.id,
+                        message_id=sent_msg.id
+                    )
+                    await bot.send_message(
+                        LOG_CHANNEL,
+                        f"**Forwarded From:** {message.from_user.mention} (`{message.from_user.id}`)"
+                    )
+                except:
+                    pass
             else:
-                await processing.edit("Uploading file...")
                 sent_msg = await message.reply_document(
                     document=filepath,
                     caption=caption
                 )
+                # Forward the document to the log channel with user details
+                try:
+                    await bot.copy_message(
+                        chat_id=LOG_CHANNEL,
+                        from_chat_id=sent_msg.chat.id,
+                        message_id=sent_msg.id
+                    )
+                    await bot.send_message(
+                        LOG_CHANNEL,
+                        f"**Forwarded From:** {message.from_user.mention} (`{message.from_user.id}`)"
+                    )
+                except:
+                    pass
 
-            # Forward to log channel
-            if sent_msg:
-                await sent_msg.forward(LOG_CHANNEL)
-
-            # Log text message
+            # Log to admin channel
             user = message.from_user
             file_size = format_bytes(os.path.getsize(filepath))
             log_text = (
