@@ -12,16 +12,18 @@ async def direct_video_handler(bot: Client, message: Message):
     if not url.lower().startswith("http"):
         return
 
-    msg = await message.reply_text("Validating the video link...")
+    msg = await message.reply_text("Checking the video link...")
 
     try:
         response = requests.get(url, stream=True)
         content_type = response.headers.get("content-type", "")
 
+        # Check by header OR file extension fallback
         if not content_type.startswith("video/"):
-            return await msg.edit("This link does not seem to be serving a valid video file.")
+            if not any(url.lower().endswith(ext) for ext in [".mp4", ".mkv", ".mov", ".avi", ".webm"]):
+                return await msg.edit("This link does not seem to serve a video file.")
 
-        ext = mimetypes.guess_extension(content_type.split(";")[0]) or ".mp4"
+        ext = mimetypes.guess_extension(content_type.split(";")[0]) or os.path.splitext(url)[-1] or ".mp4"
         filename = "video" + ext
 
         await msg.edit("Downloading the video...")
@@ -40,7 +42,7 @@ async def direct_video_handler(bot: Client, message: Message):
         await msg.delete()
 
     except Exception as e:
-        await msg.edit(f"Failed to download: `{e}`")
+        await msg.edit(f"Download failed: `{e}`")
 
     finally:
         if os.path.exists(filename):
