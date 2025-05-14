@@ -2,7 +2,7 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 
 # MongoDB কনফিগারেশন
-client = MongoClient("mongodb://localhost:27017/")  # আপনার MongoDB URI এখানে দিন
+client = MongoClient("mongodb+srv://siamkfah48:siamkfah48@cluster0.fbodc0r.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")  # আপনার MongoDB URI এখানে দিন
 db = client['video_downloader']
 
 # রেট লিমিটের জন্য MongoDB কনফিগারেশন
