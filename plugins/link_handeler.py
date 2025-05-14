@@ -84,7 +84,7 @@ def download_with_ytdlp(url, format_type="video", download_dir="/tmp"):
             filename = os.path.splitext(filename)[0] + ".mp3"
         return filename, info
 
-@Client.on_message(filters.private & filters.text)
+@Client.on_message(filters.private & filters.text & ~filters.command("start"))
 async def ask_format(bot: Client, message: Message):
     if not message.text.lower().startswith("http"):
         return await message.reply_text("Please send a valid media link.")
