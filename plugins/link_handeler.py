@@ -4,7 +4,7 @@ import subprocess
 import json
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message, InputFile
+from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from urllib.parse import urlparse
 
@@ -111,7 +111,7 @@ async def direct_video_handler(bot: Client, message: Message):
                     duration=int(duration) if duration else None,
                     width=width if width else None,
                     height=height if height else None,
-                    thumb=InputFile(thumb) if thumb else None
+                    thumb=thumb if thumb else None
                 )
             else:
                 await safe_reply(
