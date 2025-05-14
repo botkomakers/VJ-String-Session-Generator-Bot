@@ -1,22 +1,18 @@
 import os
 import aiohttp
-import asyncio
 import subprocess
 import json
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from urllib.parse import urlparse
 
-# সমর্থিত ভিডিও এক্সটেনশন
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-# ইউআরএল থেকে এক্সটেনশন বের করা
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext.lower() in VIDEO_EXTENSIONS else ".mp4"
 
-# ভিডিও ডাউনলোড
 async def download_video(url, filename):
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -31,7 +27,6 @@ async def download_video(url, filename):
                     f.write(chunk)
     return filename
 
-# ভিডিও থেকে metadata বের করা (ffprobe দিয়ে)
 def extract_metadata(file_path):
     try:
         cmd = [
@@ -42,15 +37,18 @@ def extract_metadata(file_path):
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
+
+        if "streams" not in data or not data["streams"]:
+            return 0, 0, 0  # fallback
+
         stream = data["streams"][0]
 
+        # Extract duration safely
         duration_str = stream.get("duration", "0")
-        
-        # নিশ্চিত করা যে duration একটি float
         try:
             duration = float(duration_str)
-        except ValueError:
-            duration = 0.0  # যদি duration প্যারামিটারটি সঠিক না থাকে, তাহলে 0.0 দেওয়া হবে।
+        except:
+            duration = 0.0
 
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
@@ -58,10 +56,9 @@ def extract_metadata(file_path):
         return duration, width, height
     except Exception as e:
         print(f"Metadata extraction error: {e}")
-        return 0.0, 0, 0  # Default value
+        return 0.0, 0, 0
 
-# থাম্বনেইল জেনারেট
-def generate_thumbnail(file_path, output_thumb="thumb.jpg"):
+def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
@@ -71,7 +68,6 @@ def generate_thumbnail(file_path, output_thumb="thumb.jpg"):
     except:
         return None
 
-# মেসেজ হ্যান্ডলার
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_video_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
@@ -90,11 +86,10 @@ async def direct_video_handler(bot: Client, message: Message):
     await msg.edit(f"Downloading {len(valid_urls)} video(s)...")
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
-        filename = f"video_{index}{ext}"
+        filename = f"/tmp/video_{index}{ext}"
         try:
             await download_video(url, filename)
 
-            # নিশ্চিত যে ফাইলটি সেভ হয়েছে
             if not os.path.exists(filename):
                 raise Exception(f"File {filename} was not downloaded successfully.")
 
@@ -104,9 +99,9 @@ async def direct_video_handler(bot: Client, message: Message):
             await message.reply_video(
                 video=filename,
                 caption=f"**Downloaded from:** `{url}`",
-                duration=int(duration) if duration else None,  # float -> int
-                width=width or None,
-                height=height or None,
+                duration=int(duration) if duration else None,
+                width=width if width else None,
+                height=height if height else None,
                 thumb=thumb if thumb else None
             )
         except Exception as e:
@@ -114,7 +109,7 @@ async def direct_video_handler(bot: Client, message: Message):
         finally:
             if os.path.exists(filename):
                 os.remove(filename)
-            if os.path.exists("thumb.jpg"):
-                os.remove("thumb.jpg")
+            if os.path.exists("/tmp/thumb.jpg"):
+                os.remove("/tmp/thumb.jpg")
 
     await msg.delete()
