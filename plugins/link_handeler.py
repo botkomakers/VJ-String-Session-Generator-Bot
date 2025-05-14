@@ -5,13 +5,31 @@ import traceback
 import datetime
 import time
 import yt_dlp
-import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+
+def download_with_ytdlp(url, download_dir="/tmp", audio_only=False):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "bestaudio/best" if audio_only else "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "postprocessors": [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }] if audio_only else [],
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        if audio_only:
+            filename = os.path.splitext(filename)[0] + ".mp3"
+        return filename, info
 
 def format_bytes(size):
     power = 1024
@@ -24,23 +42,13 @@ def format_bytes(size):
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
+        import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
         return output_thumb if os.path.exists(output_thumb) else None
-    except:
-        return None
-
-def extract_audio_from_video(video_path, output_audio_path):
-    try:
-        subprocess.run(
-            ["ffmpeg", "-i", video_path, "-vn", "-acodec", "libmp3lame", output_audio_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        return output_audio_path if os.path.exists(output_audio_path) else None
     except:
         return None
 
@@ -56,70 +64,66 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-def download_with_ytdlp(url, format_type="video", download_dir="/tmp"):
-    if format_type == "audio":
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192"
-            }],
-            "quiet": True,
-            "no_warnings": True
-        }
-    else:
-        ydl_opts = {
-            "format": "best[ext=mp4]/best",
-            "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True
-        }
+link_store = {}
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        if format_type == "audio":
-            filename = os.path.splitext(filename)[0] + ".mp3"
-        return filename, info
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def auto_download_handler(bot: Client, message: Message):
+    urls = message.text.strip().split()
+    valid_urls = [url for url in urls if url.lower().startswith("http")]  
+    if not valid_urls:
+        return await message.reply("No valid links detected.")
 
-@Client.on_message(filters.private & filters.text & ~filters.command("start"))
-async def ask_format(bot: Client, message: Message):
-    if not message.text.lower().startswith("http"):
-        return await message.reply_text("Please send a valid media link.")
-    
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Audio", callback_data=f"download|audio|{message.text}"),
-                InlineKeyboardButton("Video", callback_data=f"download|video|{message.text}")
-            ]
-        ]
-    )
-    await message.reply_text(
-        "What do you want to download?",
-        reply_markup=keyboard
-    )
+    link_store[message.chat.id] = valid_urls[0]  # Store only first valid URL for simplicity
 
-@Client.on_callback_query(filters.regex(r"^download\|(audio|video)\|(.+)"))
-async def handle_download(bot: Client, query: CallbackQuery):
-    await query.answer()
-    format_type, url = query.data.split("|")[1:]
-    user = query.from_user
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Audio", callback_data="dl_audio"),
+         InlineKeyboardButton("Video", callback_data="dl_video")]
+    ])
 
-    processing = await query.message.reply_text("Processing your request...")
+    # Send reply message with the link
+    link_reply = await message.reply(f"Link detected: {valid_urls[0]}", reply_markup=buttons)
+    await link_reply.delete()  # Delete the link reply message after a while
 
+    await message.reply("What do you want to download?", reply_markup=buttons)
+
+@Client.on_callback_query(filters.regex("dl_"))
+async def button_handler(bot: Client, query: CallbackQuery):
+    user_id = query.from_user.id
+    if user_id not in link_store:
+        return await query.answer("Session expired. Please send the link again.", show_alert=True)
+
+    url = link_store.pop(user_id)
+    choice = query.data.split("_")[1]
+
+    await query.message.edit_text(f"Processing {choice.title()} download...\n{url}")
+
+    audio_only = (choice == "audio")
     try:
-        filepath, info = await asyncio.to_thread(download_with_ytdlp, url, format_type)
+        # Sending initial reply with link before deleting
+        link_reply = await query.message.reply(f"Link detected: {url}")
+
+        # Delete the link reply after a while
+        await asyncio.sleep(1)
+        await link_reply.delete()
+
+        # Downloading
+        filepath, info = await asyncio.to_thread(download_with_ytdlp, url, audio_only=audio_only)
 
         if not os.path.exists(filepath):
-            raise Exception("Download failed.")
+            raise Exception("Download failed or file not found.")
 
         ext = os.path.splitext(filepath)[1]
         caption = f"**Downloaded from:**\n{url}"
 
-        if format_type == "video":
+        # If it's audio and user wants image with it
+        if audio_only:
+            thumb = generate_thumbnail(filepath)  # Optional image thumbnail
+            await query.message.reply_audio(
+                audio=filepath,
+                caption=caption,
+                thumb=thumb if thumb else None  # Attach image as thumbnail for audio
+            )
+        elif ext.lower() in VIDEO_EXTENSIONS:
             thumb = generate_thumbnail(filepath)
             await query.message.reply_video(
                 video=filepath,
@@ -127,12 +131,13 @@ async def handle_download(bot: Client, query: CallbackQuery):
                 thumb=thumb if thumb else None
             )
         else:
-            await query.message.reply_audio(
-                audio=filepath,
+            await query.message.reply_document(
+                document=filepath,
                 caption=caption
             )
 
-        # Log
+        # Log to admin channel
+        user = query.from_user
         file_size = format_bytes(os.path.getsize(filepath))
         log_text = (
             f"**New Download Event**\n\n"
@@ -140,7 +145,7 @@ async def handle_download(bot: Client, query: CallbackQuery):
             f"**Link:** `{url}`\n"
             f"**File Name:** `{os.path.basename(filepath)}`\n"
             f"**Size:** `{file_size}`\n"
-            f"**Type:** `{format_type.capitalize()}`\n"
+            f"**Type:** `{'Audio' if audio_only else 'Video'}`\n"
             f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
         try:
@@ -148,11 +153,12 @@ async def handle_download(bot: Client, query: CallbackQuery):
         except:
             pass
 
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
     except Exception as e:
         traceback.print_exc()
-        await query.message.reply_text(f"❌ Download failed:\n{e}")
+        await query.message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
     finally:
-        await processing.delete()
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
