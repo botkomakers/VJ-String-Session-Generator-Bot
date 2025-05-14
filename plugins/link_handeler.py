@@ -6,7 +6,7 @@ import datetime
 import time
 import yt_dlp
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
@@ -22,7 +22,7 @@ def download_with_ytdlp(url, download_dir="/tmp"):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-    return filename, info
+        return filename, info
 
 def format_bytes(size):
     power = 1024
@@ -70,116 +70,64 @@ async def auto_download_handler(bot: Client, message: Message):
     if not valid_urls:
         return await notice.edit("No valid links detected.")
 
-    await notice.edit(f"Found {len(valid_urls)} link(s). Please choose audio or video download:")
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
-    buttons = [
-        [InlineKeyboardButton("Audio", callback_data="audio"), InlineKeyboardButton("Video", callback_data="video")]
-    ]
-    reply_markup = InlineKeyboardMarkup(buttons)
-    await notice.edit(f"Found {len(valid_urls)} link(s). Please choose audio or video download:", reply_markup=reply_markup)
-
-    @bot.on_callback_query()
-    async def on_button_click(_, callback_query):
-        action = callback_query.data
-        url = valid_urls[0]  # Assume single URL for simplicity
-
-        # Handle audio or video action
+    for url in valid_urls:
         try:
-            await callback_query.answer()
+            await notice.delete()
+            processing = await message.reply_text(f"Downloading from:\n{url}")
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
-            if action == "audio":
-                # Download audio
-                await download_and_send(bot, message, url, "audio")
+            if not os.path.exists(filepath):
+                raise Exception("Download failed or file not found.")
 
-            elif action == "video":
-                # Download video
-                await download_and_send(bot, message, url, "video")
-                
-        except Exception as e:
-            traceback.print_exc()
-            await callback_query.message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
-    
-async def download_and_send(bot, message, url, download_type):
-    notice = await message.reply_text(f"Downloading {download_type} from:\n{url}")
-    
-    try:
-        filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
-        
-        if not os.path.exists(filepath):    
-            raise Exception("Download failed or file not found.")    
+            ext = os.path.splitext(filepath)[1]
+            caption = f"**Downloaded from:**\n{url}"
 
-        ext = os.path.splitext(filepath)[1]    
-        caption = f"**Downloaded from:**\n{url}"
-
-        if download_type == "video" and ext.lower() in VIDEO_EXTENSIONS:
-            thumb = generate_thumbnail(filepath)    
-            await notice.delete()    
-            await message.reply_video(    
-                video=filepath,    
-                caption=caption,    
-                thumb=thumb if thumb else None    
-            )    
-        elif download_type == "audio":
-            # If the video doesn't have audio, extract it
             if ext.lower() in VIDEO_EXTENSIONS:
-                audio_file = filepath.replace(ext, ".mp3")
-                await extract_audio(filepath, audio_file)
-                await message.reply_audio(
-                    audio=audio_file,
-                    caption=caption
+                thumb = generate_thumbnail(filepath)
+                await processing.delete()
+                await message.reply_video(
+                    video=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None
                 )
             else:
-                await message.reply_audio(
-                    audio=filepath,
+                await processing.delete()
+                await message.reply_document(
+                    document=filepath,
                     caption=caption
                 )
 
-        else:    
-            await notice.delete()    
-            await message.reply_document(    
-                document=filepath,    
-                caption=caption    
+            # Log to admin channel
+            user = message.from_user
+            file_size = format_bytes(os.path.getsize(filepath))
+            log_text = (
+                f"**New Download Event**\n\n"
+                f"**User:** {user.mention} (`{user.id}`)\n"
+                f"**Link:** `{url}`\n"
+                f"**File Name:** `{os.path.basename(filepath)}`\n"
+                f"**Size:** `{file_size}`\n"
+                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
             )
+            try:
+                await bot.send_message(LOG_CHANNEL, log_text)
+            except:
+                pass
 
-        # Log to admin channel
-        user = message.from_user    
-        file_size = format_bytes(os.path.getsize(filepath))    
-        log_text = (    
-            f"**New Download Event**\n\n"    
-            f"**User:** {user.mention} (`{user.id}`)\n"    
-            f"**Link:** `{url}`\n"    
-            f"**File Name:** `{os.path.basename(filepath)}`\n"    
-            f"**Size:** `{file_size}`\n"    
-            f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"    
-            f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"    
-        )    
-        try:    
-            await bot.send_message(LOG_CHANNEL, log_text)    
-        except:    
-            pass
-
-    except FloodWait as e:    
-        await asyncio.sleep(e.value)    
-    except Exception as e:    
-        traceback.print_exc()    
-        await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")    
-    finally:    
-        try:    
-            if os.path.exists(filepath):    
-                os.remove(filepath)    
-            if os.path.exists("/tmp/thumb.jpg"):    
-                os.remove("/tmp/thumb.jpg")    
-            await auto_cleanup()    
-        except:    
-            pass
-
-async def extract_audio(video_file, audio_file):
-    try:
-        import subprocess
-        subprocess.run(
-            ["ffmpeg", "-i", video_file, "-vn", "-acodec", "mp3", audio_file],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-    except Exception as e:
-        print(f"Error extracting audio: {e}")
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
+        except Exception as e:
+            traceback.print_exc()
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+        finally:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
+                await auto_cleanup()
+            except:
+                pass
