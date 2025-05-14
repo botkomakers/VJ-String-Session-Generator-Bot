@@ -1,16 +1,24 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from config import temp
 import aiohttp
 import asyncio
 import os
-import mimetypes
 from urllib.parse import urlparse
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
 
+def get_extension_from_url(url):
+    parsed = urlparse(url)
+    ext = os.path.splitext(parsed.path)[1]
+    return ext if ext.lower() in VIDEO_EXTENSIONS else ".mp4"
+
 async def download_video(url, filename):
-    async with aiohttp.ClientSession() as session:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+    }
+    async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as resp:
             if resp.status != 200:
                 raise Exception(f"Failed to fetch: {resp.status}")
@@ -25,17 +33,14 @@ async def download_video(url, filename):
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_video_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-
     msg = await message.reply_text("Checking provided links...")
 
     valid_urls = []
     for url in urls:
         if not url.lower().startswith("http"):
             continue
-        parsed = urlparse(url)
-        ext = os.path.splitext(parsed.path)[1]
-        if ext.lower() in VIDEO_EXTENSIONS:
-            valid_urls.append((url, ext))
+        ext = get_extension_from_url(url)
+        valid_urls.append((url, ext))
 
     if not valid_urls:
         return await msg.edit("No valid video links found.")
