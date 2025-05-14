@@ -16,7 +16,7 @@ def get_extension_from_url(url):
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext else ".bin"
 
-async def download_file(url, filename):
+async def download_file(url, filename, progress_message):
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as resp:
@@ -31,6 +31,12 @@ async def download_file(url, filename):
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if total:
+                        percent = downloaded * 100 / total
+                        try:
+                            await progress_message.edit_text(f"**Downloading...** `{percent:.2f}%`")
+                        except:
+                            pass
     return filename
 
 def extract_metadata(file_path):
@@ -46,9 +52,16 @@ def extract_metadata(file_path):
         if "streams" not in data or not data["streams"]:
             return 0, 0, 0
         stream = data["streams"][0]
-        duration = float(stream.get("duration", "0") or 0)
-        width = int(stream.get("width", 0))
-        height = int(stream.get("height", 0))
+
+        # Safe parsing for duration
+        duration_str = stream.get("duration", "0") or "0"
+        try:
+            duration = float(duration_str)
+        except ValueError:
+            duration = 0
+
+        width = int(stream.get("width", 0) or 0)
+        height = int(stream.get("height", 0) or 0)
         return duration, width, height
     except Exception:
         return 0, 0, 0
@@ -77,69 +90,54 @@ async def direct_link_handler(bot: Client, message: Message):
     if not valid_urls:
         return await reply.edit("No valid downloadable links found.")
 
-    try:
-        await reply.edit(f"Found {len(valid_urls)} file(s). Starting...")
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
+    await reply.edit(f"Found {len(valid_urls)} file(s). Starting download...")
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
         filename = f"/tmp/file_{index}{ext}"
         try:
-            # Downloading
-            status_msg = await message.reply_text(f"**Starting download:** {url}")
-            await download_file(url, filename)
+            progress_message = await message.reply_text(f"**Downloading:** `{url}`")
+            await download_file(url, filename, progress_message)
 
             if not os.path.exists(filename):
                 raise Exception("File download failed.")
 
             caption = f"**Downloaded from:** `{url}`"
 
-            # Uploading
             if ext.lower() in VIDEO_EXTENSIONS:
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
-                try:
-                    await status_msg.edit_text("**Uploading video...** Please wait.")
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
+                video_kwargs = {
+                    "video": filename,
+                    "caption": caption,
+                }
+                if isinstance(duration, (int, float)) and duration > 0:
+                    video_kwargs["duration"] = int(duration)
+                if isinstance(width, int) and width > 0:
+                    video_kwargs["width"] = width
+                if isinstance(height, int) and height > 0:
+                    video_kwargs["height"] = height
+                if thumb:
+                    video_kwargs["thumb"] = thumb
 
-                with open(filename, "rb") as video_file:
-                    await message.reply_video(
-                        video=video_file,
-                        caption=caption,
-                        duration=int(duration) if duration else None,
-                        width=width if width else None,
-                        height=height if height else None,
-                        thumb=thumb if thumb else None
-                    )
+                await progress_message.edit_text("**Uploading video...** Please wait.")
+                await message.reply_video(**video_kwargs)
 
             else:
-                try:
-                    await status_msg.edit_text("**Uploading file...** Please wait.")
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-
-                with open(filename, "rb") as doc_file:
-                    await message.reply_document(
-                        document=doc_file,
-                        caption=caption
-                    )
+                await progress_message.edit_text("**Uploading file...** Please wait.")
+                await message.reply_document(document=filename, caption=caption)
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
+            continue
         except Exception as e:
             traceback.print_exc()
             await message.reply_text(f"❌ Error with `{url}`\n\n**{e}**")
         finally:
-            try:
-                await status_msg.delete()
-            except: pass
             if os.path.exists(filename):
                 os.remove(filename)
             if os.path.exists("/tmp/thumb.jpg"):
                 os.remove("/tmp/thumb.jpg")
+            await progress_message.delete()
 
-    try:
-        await reply.delete()
-    except: pass
+    await reply.delete()
