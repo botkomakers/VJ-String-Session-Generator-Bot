@@ -1,31 +1,28 @@
 import os
 import aiohttp
+import asyncio
+import mimetypes
 import subprocess
 import json
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from urllib.parse import urlparse
+from pyrogram.errors import FloodWait
 
-VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+from config import temp
 
-def get_extension_from_url(url):
-    parsed = urlparse(url)
-    ext = os.path.splitext(parsed.path)[1]
-    return ext if ext.lower() in VIDEO_EXTENSIONS else ".mp4"
+def safe_float(value):
+    try:
+        return float(value)
+    except:
+        return 0.0
 
-async def download_video(url, filename):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise Exception(f"Failed to fetch: {resp.status}")
-            with open(filename, 'wb') as f:
-                while True:
-                    chunk = await resp.content.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-    return filename
+async def safe_send(func, *args, **kwargs):
+    try:
+        return await func(*args, **kwargs)
+    except FloodWait as e:
+        print(f"[universal_video_bot] Waiting for {e.value} seconds before continuing (required by {func.__name__})")
+        await asyncio.sleep(e.value)
+        return await func(*args, **kwargs)
 
 def extract_metadata(file_path):
     try:
@@ -37,79 +34,50 @@ def extract_metadata(file_path):
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
-
-        if "streams" not in data or not data["streams"]:
-            return 0, 0, 0  # fallback
-
-        stream = data["streams"][0]
-
-        # Extract duration safely
-        duration_str = stream.get("duration", "0")
-        try:
-            duration = float(duration_str)
-        except:
-            duration = 0.0
-
+        stream = data.get("streams", [{}])[0]
+        duration = safe_float(stream.get("duration"))
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
-
         return duration, width, height
     except Exception as e:
-        print(f"Metadata extraction error: {e}")
+        print(f"Metadata error: {e}")
         return 0.0, 0, 0
 
-def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
-    try:
-        subprocess.run(
-            ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        return output_thumb if os.path.exists(output_thumb) else None
-    except:
-        return None
-
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
-async def direct_video_handler(bot: Client, message: Message):
-    urls = message.text.strip().split()
-    msg = await message.reply_text("Analyzing links...")
-
-    valid_urls = []
-    for url in urls:
-        if not url.lower().startswith("http"):
-            continue
-        ext = get_extension_from_url(url)
-        valid_urls.append((url, ext))
-
-    if not valid_urls:
-        return await msg.edit("No valid video links found.")
-
-    await msg.edit(f"Downloading {len(valid_urls)} video(s)...")
-
-    for index, (url, ext) in enumerate(valid_urls, start=1):
-        filename = f"/tmp/video_{index}{ext}"
+async def direct_video_handler(client, message: Message):
+    urls = [word for word in message.text.split() if word.startswith("http")]
+    if not urls:
+        return await safe_send(message.reply_text, "No valid link found.")
+    
+    msg = await safe_send(message.reply_text, "Analyzing links...")
+    
+    for i, url in enumerate(urls):
+        filename = f"video_{i+1}"
+        ext = os.path.splitext(url)[1]
+        if not ext:
+            ext = mimetypes.guess_extension("video/mp4") or ".mp4"
+        file_path = f"{filename}{ext}"
+        
         try:
-            await download_video(url, filename)
+            await safe_send(msg.edit, f"Downloading: `{url}`")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        with open(file_path, "wb") as f:
+                            f.write(await resp.read())
+                    else:
+                        await safe_send(msg.edit, f"Failed to download: {url}")
+                        continue
 
-            if not os.path.exists(filename):
-                raise Exception(f"File {filename} was not downloaded successfully.")
+            duration, width, height = extract_metadata(file_path)
 
-            duration, width, height = extract_metadata(filename)
-            thumb = generate_thumbnail(filename)
+            await safe_send(msg.edit, f"Uploading `{os.path.basename(file_path)}` to Telegram...")
+            await safe_send(message.reply_video, video=file_path, duration=int(duration), width=width, height=height, caption="Here's your video!")
 
-            await message.reply_video(
-                video=filename,
-                caption=f"**Downloaded from:** `{url}`",
-                duration=int(duration) if duration else None,
-                width=width if width else None,
-                height=height if height else None,
-                thumb=thumb if thumb else None
-            )
         except Exception as e:
-            await message.reply_text(f"Failed to process: `{url}`\n\nError: `{e}`")
+            await safe_send(message.reply_text, f"Failed to process: {url}\n\nError: {e}")
         finally:
-            if os.path.exists(filename):
-                os.remove(filename)
-            if os.path.exists("/tmp/thumb.jpg"):
-                os.remove("/tmp/thumb.jpg")
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
-    await msg.delete()
+    await safe_send(msg.delete)
