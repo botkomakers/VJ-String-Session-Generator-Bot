@@ -22,12 +22,15 @@ async def download_file(url, filename):
         async with session.get(url) as resp:
             if resp.status != 200:
                 raise Exception(f"Failed to fetch: {resp.status}")
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
             with open(filename, 'wb') as f:
                 while True:
                     chunk = await resp.content.read(1024 * 512)
                     if not chunk:
                         break
                     f.write(chunk)
+                    downloaded += len(chunk)
     return filename
 
 def extract_metadata(file_path):
@@ -63,10 +66,7 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_link_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-    try:
-        await message.reply_chat_action("typing")
-    except:
-        pass
+    reply = await message.reply_text("**Analyzing and processing...**")
 
     valid_urls = []
     for url in urls:
@@ -75,12 +75,18 @@ async def direct_link_handler(bot: Client, message: Message):
             valid_urls.append((url, ext))
 
     if not valid_urls:
-        return await message.reply_text("No valid downloadable links found.")
+        return await reply.edit("No valid downloadable links found.")
+
+    try:
+        await reply.edit(f"Found {len(valid_urls)} file(s). Starting...")
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
         filename = f"/tmp/file_{index}{ext}"
         try:
-            await message.reply_chat_action("upload_document")
+            # Downloading
+            status_msg = await message.reply_text(f"**Starting download:** {url}")
             await download_file(url, filename)
 
             if not os.path.exists(filename):
@@ -88,33 +94,52 @@ async def direct_link_handler(bot: Client, message: Message):
 
             caption = f"**Downloaded from:** `{url}`"
 
+            # Uploading
             if ext.lower() in VIDEO_EXTENSIONS:
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
-                video_kwargs = {
-                    "video": filename,
-                    "caption": caption,
-                }
-                if isinstance(duration, (int, float)) and duration > 0:
-                    video_kwargs["duration"] = int(duration)
-                if isinstance(width, int) and width > 0:
-                    video_kwargs["width"] = width
-                if isinstance(height, int) and height > 0:
-                    video_kwargs["height"] = height
-                if thumb:
-                    video_kwargs["thumb"] = thumb
+                try:
+                    await status_msg.edit_text("**Uploading video...** Please wait.")
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
 
-                await message.reply_video(**video_kwargs)
+                with open(filename, "rb") as video_file:
+                    await message.reply_video(
+                        video=video_file,
+                        caption=caption,
+                        duration=int(duration) if duration else None,
+                        width=width if width else None,
+                        height=height if height else None,
+                        thumb=thumb if thumb else None
+                    )
 
             else:
-                await message.reply_document(document=filename, caption=caption)
+                try:
+                    await status_msg.edit_text("**Uploading file...** Please wait.")
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
 
+                with open(filename, "rb") as doc_file:
+                    await message.reply_document(
+                        document=doc_file,
+                        caption=caption
+                    )
+
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
         except Exception as e:
             traceback.print_exc()
             await message.reply_text(f"❌ Error with `{url}`\n\n**{e}**")
         finally:
+            try:
+                await status_msg.delete()
+            except: pass
             if os.path.exists(filename):
                 os.remove(filename)
             if os.path.exists("/tmp/thumb.jpg"):
                 os.remove("/tmp/thumb.jpg")
+
+    try:
+        await reply.delete()
+    except: pass
