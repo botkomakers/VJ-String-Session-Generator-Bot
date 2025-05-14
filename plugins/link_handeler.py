@@ -91,6 +91,11 @@ async def direct_video_handler(bot: Client, message: Message):
         filename = f"video_{index}{ext}"
         try:
             await download_video(url, filename)
+
+            # নিশ্চিত যে ফাইলটি সেভ হয়েছে
+            if not os.path.exists(filename):
+                raise Exception(f"File {filename} was not downloaded successfully.")
+
             duration, width, height = extract_metadata(filename)
             thumb = generate_thumbnail(filename)
 
