@@ -45,10 +45,12 @@ def extract_metadata(file_path):
         stream = data["streams"][0]
 
         duration_str = stream.get("duration", "0")
+        
+        # নিশ্চিত করা যে duration একটি float
         try:
-            duration = int(float(duration_str))
-        except:
-            duration = 0
+            duration = float(duration_str)
+        except ValueError:
+            duration = 0.0  # যদি duration প্যারামিটারটি সঠিক না থাকে, তাহলে 0.0 দেওয়া হবে।
 
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
@@ -56,7 +58,7 @@ def extract_metadata(file_path):
         return duration, width, height
     except Exception as e:
         print(f"Metadata extraction error: {e}")
-        return 0, 0, 0
+        return 0.0, 0, 0  # Default value
 
 # থাম্বনেইল জেনারেট
 def generate_thumbnail(file_path, output_thumb="thumb.jpg"):
@@ -102,7 +104,7 @@ async def direct_video_handler(bot: Client, message: Message):
             await message.reply_video(
                 video=filename,
                 caption=f"**Downloaded from:** `{url}`",
-                duration=duration or None,
+                duration=int(duration) if duration else None,  # float -> int
                 width=width or None,
                 height=height or None,
                 thumb=thumb if thumb else None
