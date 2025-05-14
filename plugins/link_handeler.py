@@ -5,6 +5,7 @@ import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from urllib.parse import urlparse
+import json
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
@@ -29,15 +30,20 @@ async def download_video(url, filename):
 
 def extract_metadata(file_path):
     try:
-        import cv2
-        cap = cv2.VideoCapture(file_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,duration",
+            "-of", "json", file_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        data = json.loads(result.stdout)
+        stream = data["streams"][0]
 
-        duration = int(frame_count / fps) if fps and fps > 0 else 0
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        cap.release()
+        duration = int(float(stream.get("duration", 0)))
+        width = int(stream.get("width", 0))
+        height = int(stream.get("height", 0))
+
         return duration, width, height
     except Exception as e:
         print(f"Metadata extraction error: {e}")
