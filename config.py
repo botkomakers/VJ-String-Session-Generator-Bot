@@ -1,5 +1,9 @@
 from os import environ
 
+
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", -1002589776901))
+
+
 # Telegram Account Api Id And Api Hash
 API_ID = int(environ.get("API_ID", "20591811"))
 API_HASH = environ.get("API_HASH", "")
