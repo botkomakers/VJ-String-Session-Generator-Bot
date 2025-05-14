@@ -1,68 +1,70 @@
-import asyncio
-import os
-import mimetypes
-import requests
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import temp
+import aiohttp
+import asyncio
+import os
+import mimetypes
+from urllib.parse import urlparse
 
-download_queue = asyncio.Queue()
-is_processing = False
+VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
+
+async def download_video(url, filename):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to fetch: {resp.status}")
+            with open(filename, 'wb') as f:
+                while True:
+                    chunk = await resp.content.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    return filename
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
-async def queue_video_handler(bot: Client, message: Message):
-    url = message.text.strip()
+async def direct_video_handler(bot: Client, message: Message):
+    urls = message.text.strip().split()
 
-    if not url.lower().startswith("http"):
-        return
+    msg = await message.reply_text("Checking provided links...")
 
-    await download_queue.put((bot, message, url))
-    await message.reply_text("✅ Added to processing queue. Please wait...")
+    valid_urls = []
+    for url in urls:
+        if not url.lower().startswith("http"):
+            continue
+        parsed = urlparse(url)
+        ext = os.path.splitext(parsed.path)[1]
+        if ext.lower() in VIDEO_EXTENSIONS:
+            valid_urls.append((url, ext))
 
-    if not temp.get("is_downloading", False):
-        asyncio.create_task(process_download_queue())
+    if not valid_urls:
+        return await msg.edit("No valid video links found.")
 
+    await msg.edit(f"Found {len(valid_urls)} video(s). Starting download...")
 
-async def process_download_queue():
-    temp["is_downloading"] = True
+    tasks = []
+    file_names = []
 
-    while not download_queue.empty():
-        bot, message, url = await download_queue.get()
-        status = await message.reply_text("⏳ Processing your video...")
+    for index, (url, ext) in enumerate(valid_urls, start=1):
+        filename = f"video_{index}{ext}"
+        tasks.append(download_video(url, filename))
+        file_names.append(filename)
 
-        try:
-            response = requests.get(url, stream=True, timeout=10)
-            content_type = response.headers.get("content-type", "")
+    try:
+        await asyncio.gather(*tasks)
+        await msg.edit("Uploading video(s) to Telegram...")
 
-            if not content_type.startswith("video/"):
-                if not any(url.lower().endswith(ext) for ext in [".mp4", ".mkv", ".mov", ".avi", ".webm"]):
-                    await status.edit("This link does not seem to be a valid video.")
-                    continue
-
-            ext = mimetypes.guess_extension(content_type.split(";")[0]) or os.path.splitext(url)[-1] or ".mp4"
-            filename = "video" + ext
-
-            await status.edit("⬇️ Downloading...")
-
-            with open(filename, "wb") as f:
-                for chunk in response.iter_content(chunk_size=1024 * 1024 * 4):  # Increased chunk size for faster download
-                    if chunk:
-                        f.write(chunk)
-
-            await status.edit("⬆️ Uploading to Telegram...")
-
+        for file, (url, _) in zip(file_names, valid_urls):
             await message.reply_video(
-                video=filename,
+                video=file,
                 caption=f"**Downloaded from:** `{url}`"
             )
+            os.remove(file)
 
-            await status.delete()
+        await msg.delete()
 
-        except Exception as e:
-            await status.edit(f"❌ Failed: `{e}`")
-
-        finally:
-            if os.path.exists(filename):
-                os.remove(filename)
-
-    temp["is_downloading"] = False
+    except Exception as e:
+        await msg.edit(f"Error occurred: `{e}`")
+        for file in file_names:
+            if os.path.exists(file):
+                os.remove(file)
