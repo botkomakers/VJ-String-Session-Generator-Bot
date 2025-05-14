@@ -1,22 +1,25 @@
 import os
 import aiohttp
+import asyncio
+import traceback
 import subprocess
 import json
-import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message
 from pyrogram.errors import FloodWait
+from pyrogram.types import Message
 from urllib.parse import urlparse
 
+# সাপোর্টেড ভিডিও ফরম্যাট
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-DOWNLOAD_DIR = "/tmp"
 
+# এক্সটেনশন বের করা
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext else ".bin"
 
-async def download_video(url, filename):
+# ভিডিও বা ফাইল ডাউনলোড করা
+async def download_file(url, filename):
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as resp:
@@ -30,6 +33,7 @@ async def download_video(url, filename):
                     f.write(chunk)
     return filename
 
+# ভিডিওর metadata বের করা
 def extract_metadata(file_path):
     try:
         cmd = [
@@ -40,20 +44,17 @@ def extract_metadata(file_path):
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
-
         if "streams" not in data or not data["streams"]:
-            return 0.0, 0, 0
-
+            return 0, 0, 0
         stream = data["streams"][0]
-        duration = float(stream.get("duration", 0.0))
+        duration = float(stream.get("duration", "0") or 0)
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
-
         return duration, width, height
-    except Exception as e:
-        print(f"Metadata extraction error: {e}")
-        return 0.0, 0, 0
+    except Exception:
+        return 0, 0, 0
 
+# থাম্বনেইল জেনারেট করা
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         subprocess.run(
@@ -64,68 +65,60 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-async def safe_reply(func, *args, **kwargs):
-    while True:
-        try:
-            return await func(*args, **kwargs)
-        except FloodWait as e:
-            print(f"[FloodWait] Waiting for {e.value} seconds...")
-            await asyncio.sleep(e.value)
-        except Exception as e:
-            print(f"Reply error: {e}")
-            break
-
+# মেইন হ্যান্ডলার
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
-async def direct_video_handler(bot: Client, message: Message):
+async def direct_link_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-    msg = await safe_reply(message.reply_text, "Analyzing links...")
+    reply = await message.reply_text("Analyzing links...")
 
     valid_urls = []
     for url in urls:
-        if not url.lower().startswith("http"):
-            continue
-        ext = get_extension_from_url(url)
-        valid_urls.append((url, ext))
+        if url.lower().startswith("http"):
+            ext = get_extension_from_url(url)
+            valid_urls.append((url, ext))
 
     if not valid_urls:
-        return await safe_reply(msg.edit, "No valid file links found.")
+        return await reply.edit("No valid downloadable links found.")
 
-    await safe_reply(msg.edit, f"Downloading {len(valid_urls)} file(s)...")
+    await reply.edit(f"Downloading {len(valid_urls)} file(s)...")
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
-        filename = os.path.join(DOWNLOAD_DIR, f"file_{index}{ext}")
+        filename = f"/tmp/file_{index}{ext}"
         try:
-            await download_video(url, filename)
-
+            await download_file(url, filename)
             if not os.path.exists(filename):
-                raise Exception("Downloaded file not found!")
+                raise Exception("File download failed.")
+
+            caption = f"**Downloaded from:** `{url}`"
 
             if ext.lower() in VIDEO_EXTENSIONS:
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
-                await safe_reply(
-                    message.reply_video,
+                await message.reply_video(
                     video=filename,
-                    caption=f"**Downloaded from:** `{url}`",
+                    caption=caption,
                     duration=int(duration) if duration else None,
-                    width=width if width else None,
-                    height=height if height else None,
+                    width=width or None,
+                    height=height or None,
                     thumb=thumb if thumb else None
                 )
             else:
-                await safe_reply(
-                    message.reply_document,
+                await message.reply_document(
                     document=filename,
-                    caption=f"**Downloaded from:** `{url}`"
+                    caption=caption
                 )
+
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
         except Exception as e:
-            await safe_reply(message.reply_text, f"Failed to process: `{url}`\n\nError: `{e}`")
+            traceback.print_exc()
+            await message.reply_text(f"Error with `{url}`\n\n**{e}**")
         finally:
             if os.path.exists(filename):
                 os.remove(filename)
-            thumb_path = "/tmp/thumb.jpg"
-            if os.path.exists(thumb_path):
-                os.remove(thumb_path)
+            if os.path.exists("/tmp/thumb.jpg"):
+                os.remove("/tmp/thumb.jpg")
 
-    await safe_reply(msg.delete)
+    await reply.delete()
