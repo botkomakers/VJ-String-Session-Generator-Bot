@@ -16,30 +16,27 @@ def get_extension_from_url(url):
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext else ".bin"
 
-# Enhanced downloader with progress reporting
-async def download_file(url, filename, progress_callback=None):
+async def download_file(url, filename, progress_message):
     headers = {"User-Agent": "Mozilla/5.0"}
-    connector = aiohttp.TCPConnector(limit=16)
-    timeout = aiohttp.ClientTimeout(total=0)
-    async with aiohttp.ClientSession(headers=headers, connector=connector, timeout=timeout) as session:
+    async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as resp:
             if resp.status != 200:
                 raise Exception(f"Failed to fetch: {resp.status}")
-            total = int(resp.headers.get('Content-Length', 0))
+            total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-            last_percent = -5
             with open(filename, 'wb') as f:
                 while True:
-                    chunk = await resp.content.read(1024 * 1024)
+                    chunk = await resp.content.read(1024 * 512)
                     if not chunk:
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if progress_callback and total:
-                        percent = int((downloaded / total) * 100)
-                        if percent - last_percent >= 5 or percent == 100:
-                            await progress_callback(percent)
-                            last_percent = percent
+                    if total:
+                        percent = downloaded * 100 / total
+                        try:
+                            await progress_message.edit_text(f"**Downloading...** `{percent:.2f}%`")
+                        except:
+                            pass
     return filename
 
 def extract_metadata(file_path):
@@ -75,7 +72,7 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_link_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-    reply = await message.reply_text("🔍 Analyzing links...")
+    reply = await message.reply_text("**Analyzing and processing...**")
 
     valid_urls = []
     for url in urls:
@@ -84,22 +81,15 @@ async def direct_link_handler(bot: Client, message: Message):
             valid_urls.append((url, ext))
 
     if not valid_urls:
-        return await reply.edit("❌ No valid downloadable links found.")
+        return await reply.edit("No valid downloadable links found.")
 
-    await reply.edit(f"⬇️ Preparing to download {len(valid_urls)} file(s)...")
+    await reply.edit(f"Found {len(valid_urls)} file(s). Starting download...")
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
         filename = f"/tmp/file_{index}{ext}"
-        processing_msg = await message.reply_text(f"⚙️ Starting download...\n`{url}`", quote=True)
-
-        async def update_progress(percent):
-            try:
-                await processing_msg.edit_text(f"⬇️ Downloading... {percent}%\n`{url}`")
-            except Exception:
-                pass
-
         try:
-            await download_file(url, filename, progress_callback=update_progress)
+            progress_message = await message.reply_text(f"**Downloading:** `{url}`")
+            await download_file(url, filename, progress_message)
 
             if not os.path.exists(filename):
                 raise Exception("File download failed.")
@@ -110,36 +100,37 @@ async def direct_link_handler(bot: Client, message: Message):
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
-                await processing_msg.edit("⬆️ Uploading video...")
+                video_kwargs = {
+                    "video": filename,
+                    "caption": caption,
+                }
+                if isinstance(duration, (int, float)) and duration > 0:
+                    video_kwargs["duration"] = int(duration)
+                if isinstance(width, int) and width > 0:
+                    video_kwargs["width"] = width
+                if isinstance(height, int) and height > 0:
+                    video_kwargs["height"] = height
+                if thumb:
+                    video_kwargs["thumb"] = thumb
 
-                await message.reply_video(
-                    video=filename,
-                    caption=caption,
-                    duration=int(duration) if duration else None,
-                    width=width or None,
-                    height=height or None,
-                    thumb=thumb if thumb else None
-                )
+                await progress_message.edit_text("**Uploading video...** Please wait.")
+                await message.reply_video(**video_kwargs)
+
             else:
-                await processing_msg.edit("⬆️ Uploading file...")
-
-                await message.reply_document(
-                    document=filename,
-                    caption=caption
-                )
-
-            await processing_msg.edit("✅ Completed!")
+                await progress_message.edit_text("**Uploading file...** Please wait.")
+                await message.reply_document(document=filename, caption=caption)
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
             continue
         except Exception as e:
             traceback.print_exc()
-            await processing_msg.edit(f"❌ Error with `{url}`\n\n**{e}**")
+            await message.reply_text(f"❌ Error with `{url}`\n\n**{e}**")
         finally:
             if os.path.exists(filename):
                 os.remove(filename)
             if os.path.exists("/tmp/thumb.jpg"):
                 os.remove("/tmp/thumb.jpg")
+            await progress_message.delete()
 
     await reply.delete()
