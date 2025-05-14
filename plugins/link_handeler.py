@@ -9,10 +9,10 @@ from pyrogram.types import Message
 from urllib.parse import urlparse
 from pymongo import MongoClient
 from datetime import datetime, timedelta
-from config import MONGO_DB_URI  # Import MongoDB URI from config
+import time
 
 # MongoDB কনফিগারেশন
-client = MongoClient(MONGO_DB_URI)  # Using URI from config.py
+client = MongoClient(os.getenv("MONGO_DB_URI", "mongodb://localhost:27017"))
 db = client['video_downloader']
 rate_limit_collection = db['rate_limit']
 lock_collection = db['locks']
@@ -33,7 +33,7 @@ async def is_rate_limited(user_id: int, limit: int = 1, window: int = 60):
             "request_count": 1,
             "expires_at": current_time + timedelta(seconds=window)
         })
-        return False
+        return False  # No rate limit for the first request
 
     # চেক করা হচ্ছে কিভাবে লিমিট পরবর্তীতে রেট লিমিটেড হতে পারে
     time_difference = current_time - user_data['last_request_time']
@@ -228,35 +228,3 @@ async def process_download(bot: Client, message: Message):
                 os.remove(filename)
             if os.path.exists("/tmp/thumb.jpg"):
                 os.remove("/tmp/thumb.jpg")
-
-
-
-
-
-
-
-from pymongo import MongoClient
-from os import environ
-
-# MongoDB URI from config.py
-MONGO_DB_URI = environ.get("MONGO_DB_URI", "mongodb+srv://siamkfah48:siamkfah48@cluster0.fbodc0r.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
-
-# Connect to MongoDB
-client = MongoClient(MONGO_DB_URI)
-
-# Select the database (replace 'your_database_name' with your actual DB name)
-db = client.get_database()
-
-# Function to clean all collections
-def clean_database():
-    # Get all collections in the database
-    collections = db.list_collection_names()
-
-    # Delete all data in each collection
-    for collection in collections:
-        db[collection].drop()  # Drop the collection
-
-    print("All data has been cleaned.")
-
-# Example of calling the function
-clean_database()
