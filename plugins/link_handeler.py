@@ -9,31 +9,39 @@ from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 from urllib.parse import urlparse
 
-# সমর্থিত ভিডিও এক্সটেনশন
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-# ইউআরএল থেকে এক্সটেনশন বের করা
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext else ".bin"
 
-# ফাইল ডাউনলোড করা
-async def download_file(url, filename):
+# Enhanced downloader with progress reporting
+async def download_file(url, filename, progress_callback=None):
     headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession(headers=headers) as session:
+    connector = aiohttp.TCPConnector(limit=16)
+    timeout = aiohttp.ClientTimeout(total=0)
+    async with aiohttp.ClientSession(headers=headers, connector=connector, timeout=timeout) as session:
         async with session.get(url) as resp:
             if resp.status != 200:
                 raise Exception(f"Failed to fetch: {resp.status}")
+            total = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            last_percent = -5
             with open(filename, 'wb') as f:
                 while True:
                     chunk = await resp.content.read(1024 * 1024)
                     if not chunk:
                         break
                     f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total:
+                        percent = int((downloaded / total) * 100)
+                        if percent - last_percent >= 5 or percent == 100:
+                            await progress_callback(percent)
+                            last_percent = percent
     return filename
 
-# ভিডিওর মেটাডেটা বের করা
 def extract_metadata(file_path):
     try:
         cmd = [
@@ -45,16 +53,15 @@ def extract_metadata(file_path):
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
         if "streams" not in data or not data["streams"]:
-            return 0.0, 0, 0
+            return 0, 0, 0
         stream = data["streams"][0]
-        duration = float(stream.get("duration") or 0.0)
+        duration = float(stream.get("duration", "0") or 0)
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
         return duration, width, height
     except Exception:
-        return 0.0, 0, 0
+        return 0, 0, 0
 
-# থাম্বনেইল তৈরি করা
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         subprocess.run(
@@ -65,11 +72,10 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-# হ্যান্ডলার
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_link_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-    reply = await message.reply_text("Analyzing links...")
+    reply = await message.reply_text("🔍 Analyzing links...")
 
     valid_urls = []
     for url in urls:
@@ -78,14 +84,23 @@ async def direct_link_handler(bot: Client, message: Message):
             valid_urls.append((url, ext))
 
     if not valid_urls:
-        return await reply.edit("No valid downloadable links found.")
+        return await reply.edit("❌ No valid downloadable links found.")
 
-    await reply.edit(f"Downloading {len(valid_urls)} file(s)...")
+    await reply.edit(f"⬇️ Preparing to download {len(valid_urls)} file(s)...")
 
     for index, (url, ext) in enumerate(valid_urls, start=1):
         filename = f"/tmp/file_{index}{ext}"
+        processing_msg = await message.reply_text(f"⚙️ Starting download...\n`{url}`", quote=True)
+
+        async def update_progress(percent):
+            try:
+                await processing_msg.edit_text(f"⬇️ Downloading... {percent}%\n`{url}`")
+            except Exception:
+                pass
+
         try:
-            await download_file(url, filename)
+            await download_file(url, filename, progress_callback=update_progress)
+
             if not os.path.exists(filename):
                 raise Exception("File download failed.")
 
@@ -95,29 +110,32 @@ async def direct_link_handler(bot: Client, message: Message):
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
-                # duration অবশ্যই float বা int হতে হবে
-                duration = float(duration) if duration else 0.0
+                await processing_msg.edit("⬆️ Uploading video...")
 
                 await message.reply_video(
                     video=filename,
                     caption=caption,
-                    duration=round(duration),
+                    duration=int(duration) if duration else None,
                     width=width or None,
                     height=height or None,
                     thumb=thumb if thumb else None
                 )
             else:
+                await processing_msg.edit("⬆️ Uploading file...")
+
                 await message.reply_document(
                     document=filename,
                     caption=caption
                 )
+
+            await processing_msg.edit("✅ Completed!")
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
             continue
         except Exception as e:
             traceback.print_exc()
-            await message.reply_text(f"Error with `{url}`\n\n**{e}**")
+            await processing_msg.edit(f"❌ Error with `{url}`\n\n**{e}**")
         finally:
             if os.path.exists(filename):
                 os.remove(filename)
