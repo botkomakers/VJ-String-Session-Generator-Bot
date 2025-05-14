@@ -4,6 +4,9 @@ import os
 
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", -1002589776901))
 
+COOKIE_FILE = "cookies.txt"  # path to cookies file
+
+
 
 # Telegram Account Api Id And Api Hash
 API_ID = int(environ.get("API_ID", "20591811"))
