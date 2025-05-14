@@ -3,24 +3,25 @@ import aiohttp
 import subprocess
 import json
 import asyncio
-from urllib.parse import urlparse
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InputFile
 from pyrogram.errors import FloodWait
+from urllib.parse import urlparse
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+DOWNLOAD_DIR = "/tmp"
 
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
-    return ext.lower() if ext else ""
+    return ext if ext else ".bin"
 
-async def download_file(url, filename):
+async def download_video(url, filename):
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as resp:
             if resp.status != 200:
-                raise Exception(f"Failed to download: {resp.status}")
+                raise Exception(f"Failed to fetch: {resp.status}")
             with open(filename, 'wb') as f:
                 while True:
                     chunk = await resp.content.read(1024 * 1024)
@@ -39,13 +40,18 @@ def extract_metadata(file_path):
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         data = json.loads(result.stdout)
-        stream = data.get("streams", [{}])[0]
-        duration = float(stream.get("duration", 0))
+
+        if "streams" not in data or not data["streams"]:
+            return 0.0, 0, 0
+
+        stream = data["streams"][0]
+        duration = float(stream.get("duration", 0.0))
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
+
         return duration, width, height
     except Exception as e:
-        print(f"Metadata error: {e}")
+        print(f"Metadata extraction error: {e}")
         return 0.0, 0, 0
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
@@ -58,67 +64,68 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
-async def auto_downloader(client: Client, message: Message):
-    urls = [u for u in message.text.strip().split() if u.startswith("http")]
-    if not urls:
-        return await message.reply_text("No valid link found.")
-    
-    status = await message.reply_text("Analyzing your links...")
-
-    for index, url in enumerate(urls, start=1):
-        ext = get_extension_from_url(url)
-        filename = f"/tmp/file_{index}{ext if ext else '.bin'}"
-        
+async def safe_reply(func, *args, **kwargs):
+    while True:
         try:
-            await status.edit(f"Downloading: `{url}`")
-            await download_file(url, filename)
+            return await func(*args, **kwargs)
+        except FloodWait as e:
+            print(f"[FloodWait] Waiting for {e.value} seconds...")
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            print(f"Reply error: {e}")
+            break
 
-            if ext in VIDEO_EXTENSIONS:
-                await message.reply_chat_action("upload_video")
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def direct_video_handler(bot: Client, message: Message):
+    urls = message.text.strip().split()
+    msg = await safe_reply(message.reply_text, "Analyzing links...")
+
+    valid_urls = []
+    for url in urls:
+        if not url.lower().startswith("http"):
+            continue
+        ext = get_extension_from_url(url)
+        valid_urls.append((url, ext))
+
+    if not valid_urls:
+        return await safe_reply(msg.edit, "No valid file links found.")
+
+    await safe_reply(msg.edit, f"Downloading {len(valid_urls)} file(s)...")
+
+    for index, (url, ext) in enumerate(valid_urls, start=1):
+        filename = os.path.join(DOWNLOAD_DIR, f"file_{index}{ext}")
+        try:
+            await download_video(url, filename)
+
+            if not os.path.exists(filename):
+                raise Exception("Downloaded file not found!")
+
+            if ext.lower() in VIDEO_EXTENSIONS:
                 duration, width, height = extract_metadata(filename)
                 thumb = generate_thumbnail(filename)
 
-                try:
-                    await message.reply_video(
-                        video=filename,
-                        duration=int(duration) if duration else None,
-                        width=width if width else None,
-                        height=height if height else None,
-                        thumb=thumb if thumb else None,
-                        caption=f"**Downloaded from:** `{url}`"
-                    )
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 1)
-                    await message.reply_video(
-                        video=filename,
-                        duration=int(duration) if duration else None,
-                        width=width if width else None,
-                        height=height if height else None,
-                        thumb=thumb if thumb else None,
-                        caption=f"**Downloaded from:** `{url}`"
-                    )
+                await safe_reply(
+                    message.reply_video,
+                    video=filename,
+                    caption=f"**Downloaded from:** `{url}`",
+                    duration=int(duration) if duration else None,
+                    width=width if width else None,
+                    height=height if height else None,
+                    thumb=InputFile(thumb) if thumb else None
+                )
             else:
-                await message.reply_chat_action("upload_document")
-                try:
-                    await message.reply_document(
-                        document=filename,
-                        caption=f"**Downloaded from:** `{url}`"
-                    )
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 1)
-                    await message.reply_document(
-                        document=filename,
-                        caption=f"**Downloaded from:** `{url}`"
-                    )
-
-            await asyncio.sleep(1)  # fallback cooldown
+                await safe_reply(
+                    message.reply_document,
+                    document=filename,
+                    caption=f"**Downloaded from:** `{url}`"
+                )
         except Exception as e:
-            await message.reply_text(f"Error with `{url}`\n\n{e}")
+            await safe_reply(message.reply_text, f"Failed to process: `{url}`\n\nError: `{e}`")
         finally:
             if os.path.exists(filename):
                 os.remove(filename)
-            if os.path.exists("/tmp/thumb.jpg"):
-                os.remove("/tmp/thumb.jpg")
+            thumb_path = "/tmp/thumb.jpg"
+            if os.path.exists(thumb_path):
+                os.remove(thumb_path)
 
-    await status.delete()
+    await safe_reply(msg.delete)
