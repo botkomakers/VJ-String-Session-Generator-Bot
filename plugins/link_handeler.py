@@ -31,12 +31,16 @@ def extract_metadata(file_path):
     try:
         import cv2
         cap = cv2.VideoCapture(file_path)
-        duration = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+
+        duration = int(frame_count / fps) if fps and fps > 0 else 0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
         return duration, width, height
-    except:
+    except Exception as e:
+        print(f"Metadata extraction error: {e}")
         return 0, 0, 0
 
 def generate_thumbnail(file_path, output_thumb="thumb.jpg"):
@@ -76,9 +80,9 @@ async def direct_video_handler(bot: Client, message: Message):
             await message.reply_video(
                 video=filename,
                 caption=f"**Downloaded from:** `{url}`",
-                duration=duration if duration else None,
-                width=width if width else None,
-                height=height if height else None,
+                duration=duration or None,
+                width=width or None,
+                height=height or None,
                 thumb=thumb if thumb else None
             )
         except Exception as e:
