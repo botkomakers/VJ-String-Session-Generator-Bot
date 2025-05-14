@@ -8,29 +8,29 @@ from pyrogram.types import Message
 THUMB_URL = "https://i.ibb.co/21RKmKDG/file-1485.jpg"
 
 async def download_file(url, path):
+    timeout = aiohttp.ClientTimeout(total=90)  # 90 seconds max wait
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status == 200:
                     with open(path, "wb") as f:
                         while True:
-                            chunk = await resp.content.read(1024 * 1024)  # 1MB chunks
+                            chunk = await resp.content.read(1024)
                             if not chunk:
                                 break
                             f.write(chunk)
                     return True
-                else:
-                    print(f"Download failed with status {resp.status}")
-                    return False
     except Exception as e:
-        print(f"Download error: {e}")
-        return False
+        print("Download error:", str(e))
+    return False
+
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_video_handler(client, message: Message):
     url = message.text.strip()
+
     if not url.startswith("http"):
-        return await message.reply("❌ Invalid link!")
+        return await message.reply("❌ Invalid link provided.")
 
     status = await message.reply_photo(
         photo=THUMB_URL,
@@ -42,18 +42,21 @@ async def direct_video_handler(client, message: Message):
     mp4_path = "downloads/converted.mp4"
 
     try:
+        print("Trying to download:", url)
         ok = await download_file(url, raw_path)
-        if not ok or not os.path.exists(raw_path) or os.path.getsize(raw_path) < 1024:
-            return await status.edit_caption("❌ Failed to download or file too small.")
 
-        # Convert to MP4 using ffmpeg
-        convert_cmd = f'ffmpeg -y -i "{raw_path}" -c:v libx264 -c:a aac "{mp4_path}"'
-        conversion = subprocess.run(convert_cmd, shell=True)
+        if not ok:
+            return await status.edit_caption("❌ Failed to download the file. The link may be invalid or expired.")
 
-        if not os.path.exists(mp4_path) or os.path.getsize(mp4_path) < 1024:
-            return await status.edit_caption("❌ Conversion failed.")
+        await status.edit_caption("🎞 Converting to MP4 format...")
 
-        await status.edit_caption("⬆️ Uploading as video...")
+        convert_cmd = f'ffmpeg -i "{raw_path}" -c:v libx264 -c:a aac -strict experimental "{mp4_path}" -y'
+        try:
+            subprocess.run(convert_cmd, shell=True, timeout=300)  # 5 minutes max
+        except subprocess.TimeoutExpired:
+            return await status.edit_caption("❌ FFmpeg conversion timed out.")
+
+        await status.edit_caption("⬆️ Uploading the video...")
 
         await message.reply_video(
             video=mp4_path,
@@ -61,8 +64,11 @@ async def direct_video_handler(client, message: Message):
             thumb=THUMB_URL,
             supports_streaming=True
         )
+
     except Exception as e:
-        await message.reply(f"❌ Error: {e}")
+        print("Error:", str(e))
+        await message.reply(f"❌ Error occurred: {str(e)}")
+
     finally:
         await status.delete()
         for f in [raw_path, mp4_path]:
