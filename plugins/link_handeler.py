@@ -2,18 +2,21 @@ import os
 import aiohttp
 import asyncio
 import subprocess
+import json
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from urllib.parse import urlparse
-import json
 
+# সমর্থিত ভিডিও এক্সটেনশন
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
+# ইউআরএল থেকে এক্সটেনশন বের করা
 def get_extension_from_url(url):
     parsed = urlparse(url)
     ext = os.path.splitext(parsed.path)[1]
     return ext if ext.lower() in VIDEO_EXTENSIONS else ".mp4"
 
+# ভিডিও ডাউনলোড
 async def download_video(url, filename):
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -28,6 +31,7 @@ async def download_video(url, filename):
                     f.write(chunk)
     return filename
 
+# ভিডিও থেকে metadata বের করা (ffprobe দিয়ে)
 def extract_metadata(file_path):
     try:
         cmd = [
@@ -40,7 +44,12 @@ def extract_metadata(file_path):
         data = json.loads(result.stdout)
         stream = data["streams"][0]
 
-        duration = int(float(stream.get("duration", 0)))
+        duration_str = stream.get("duration", "0")
+        try:
+            duration = int(float(duration_str))
+        except:
+            duration = 0
+
         width = int(stream.get("width", 0))
         height = int(stream.get("height", 0))
 
@@ -49,6 +58,7 @@ def extract_metadata(file_path):
         print(f"Metadata extraction error: {e}")
         return 0, 0, 0
 
+# থাম্বনেইল জেনারেট
 def generate_thumbnail(file_path, output_thumb="thumb.jpg"):
     try:
         subprocess.run(
@@ -59,6 +69,7 @@ def generate_thumbnail(file_path, output_thumb="thumb.jpg"):
     except:
         return None
 
+# মেসেজ হ্যান্ডলার
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def direct_video_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
