@@ -70,3 +70,92 @@ async def download_handler(client, message):
 
     except Exception as e:
         await downloading.edit(f"❌ Error: {e}")
+
+
+
+
+
+
+import os
+import math
+import aiohttp
+import asyncio
+import subprocess
+from pyrogram import Client, filters
+from pyrogram.types import Message
+
+MAX_SIZE_MB = 1536
+TEMP_DIR = "/tmp"
+
+async def download_file(url: str, path: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to download: HTTP {resp.status}")
+            with open(path, "wb") as f:
+                async for chunk in resp.content.iter_chunked(1024 * 1024):
+                    f.write(chunk)
+
+def get_size_mb(path):
+    return os.path.getsize(path) / (1024 * 1024)
+
+def split_video_by_size(input_path: str, output_dir: str, max_size_mb: int):
+    total_size = os.path.getsize(input_path)
+    part_size = max_size_mb * 1024 * 1024
+    total_parts = math.ceil(total_size / part_size)
+    part_paths = []
+
+    for i in range(total_parts):
+        part_path = os.path.join(output_dir, f"part_{i+1}.mp4")
+        command = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-ss", str(i * 1800),  # 30 minutes estimate per part
+            "-fs", str(part_size),
+            "-c", "copy", part_path
+        ]
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(part_path):
+            part_paths.append(part_path)
+
+    return part_paths
+
+@Client.on_message(filters.private & filters.command("start"))
+async def start(client, message: Message):
+    await message.reply("Welcome! Just send a direct video link to download it.")
+
+@Client.on_message(filters.private & filters.text)
+async def handle_direct_link(client, message: Message):
+    url = message.text.strip()
+    if not url.startswith("http"):
+        return await message.reply("❌ Invalid link.")
+
+    tmp_video = os.path.join(TEMP_DIR, f"{message.from_user.id}_video.mp4")
+    status = await message.reply("📥 Downloading...")
+
+    try:
+        await download_file(url, tmp_video)
+        size = get_size_mb(tmp_video)
+        await status.edit(f"✅ Downloaded ({size:.2f} MB). Preparing to upload...")
+
+        if size <= MAX_SIZE_MB:
+            await message.reply_video(tmp_video, caption="🎬 Here is your video!", supports_streaming=True)
+            os.remove(tmp_video)
+            return
+
+        await status.edit(f"🔧 Splitting {size:.2f}MB into 1.5GB parts...")
+
+        parts = split_video_by_size(tmp_video, TEMP_DIR, MAX_SIZE_MB)
+        if not parts:
+            return await status.edit("❌ Failed to split the video.")
+
+        for i, part in enumerate(parts):
+            await message.reply_video(part, caption=f"📤 Part {i+1}/{len(parts)}", supports_streaming=True)
+            os.remove(part)
+
+        os.remove(tmp_video)
+        await status.edit("✅ All parts uploaded successfully!")
+
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}")
+        if os.path.exists(tmp_video):
+            os.remove(tmp_video)
