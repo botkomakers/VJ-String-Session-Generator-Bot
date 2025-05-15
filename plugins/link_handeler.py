@@ -13,6 +13,8 @@ from config import LOG_CHANNEL
 from db import save_user
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+AUDIO_EXTENSIONS = [".mp3", ".m4a", ".aac", ".opus"]
+
 user_queues = defaultdict(deque)
 active_tasks = set()
 MAX_QUEUE_LENGTH = 5
@@ -88,25 +90,30 @@ async def handle_link(bot: Client, message: Message):
 
 @Client.on_callback_query(filters.regex(r"^format:(mp4|mp3|best)\|(\d+)$"))
 async def process_format(bot: Client, query: CallbackQuery):
-    format_key, uid = query.data.split(":")[1].split("|")
-    user_id = int(uid)
+    try:
+        format_key, uid = query.data.split(":")[1].split("|")
+        user_id = int(uid)
 
-    if query.from_user.id != user_id:
-        await query.answer("This is not for you.", show_alert=True)
-        return
+        if query.from_user.id != user_id:
+            await query.answer("This is not for you.", show_alert=True)
+            return
 
-    if user_id in active_tasks:
-        await query.message.reply_text("⏳ Added to queue. Processing previous task...")
-        return
+        if user_id in active_tasks:
+            await query.message.reply_text("⏳ Added to queue. Processing previous task...")
+            return
 
-    active_tasks.add(user_id)
-    await query.message.edit_text("▶️ Download starting in background...")
-    await process_user_queue(bot, user_id, format_key)
+        active_tasks.add(user_id)
+        await query.message.edit_text("▶️ Download starting in background...")
+        await process_user_queue(bot, user_id, format_key)
+
+    except Exception as e:
+        traceback.print_exc()
+        await query.message.reply_text(f"❌ Something went wrong:\n\n{e}")
 
 async def process_user_queue(bot: Client, user_id: int, format_key="mp4"):
     while user_queues[user_id]:
         message, url = user_queues[user_id].popleft()
-        reply = await message.reply_text("Processing your video...")
+        reply = await message.reply_text("⏳ Processing your video...")
         filepath = None
 
         try:
@@ -114,16 +121,39 @@ async def process_user_queue(bot: Client, user_id: int, format_key="mp4"):
             if not os.path.exists(filepath):
                 raise Exception("Download failed")
 
-            ext = os.path.splitext(filepath)[1]
+            ext = os.path.splitext(filepath)[1].lower()
             thumb = generate_thumbnail(filepath)
-
             caption = f"✅ **Downloaded:** {info.get('title')}\n**Requested by:** {message.from_user.mention}"
 
-            sent = await message.reply_document(
-                document=filepath,
-                caption=caption,
-                thumb=thumb if thumb else None
-            )
+            duration = int(info.get("duration", 0))
+            width = int(info.get("width", 0))
+            height = int(info.get("height", 0))
+
+            if ext in VIDEO_EXTENSIONS:
+                sent = await message.reply_video(
+                    video=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None,
+                    duration=duration or None,
+                    width=width or None,
+                    height=height or None,
+                    supports_streaming=True
+                )
+            elif ext in AUDIO_EXTENSIONS:
+                sent = await message.reply_audio(
+                    audio=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None,
+                    duration=duration or None,
+                    performer=info.get("uploader"),
+                    title=info.get("title")
+                )
+            else:
+                sent = await message.reply_document(
+                    document=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None
+                )
 
             forwarded = await sent.copy(chat_id=LOG_CHANNEL)
             log_text = (
@@ -150,7 +180,7 @@ async def process_user_queue(bot: Client, user_id: int, format_key="mp4"):
 @Client.on_message(filters.private & filters.command("cancel"))
 async def cancel_user_queue(bot: Client, message: Message):
     user_id = message.from_user.id
-    if user_id in user_queues:
+    if user_id in user_queues and user_queues[user_id]:
         user_queues[user_id].clear()
         await message.reply_text("✅ Your queue has been cleared.")
     else:
