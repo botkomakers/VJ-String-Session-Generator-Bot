@@ -9,26 +9,9 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
-from functools import wraps
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-DOWNLOAD_QUEUE = {}
-THROTTLE_LIMIT = {}  # user_id: timestamp
-MAX_FILE_SIZE_MB = 2048  # 2GB
-QUEUE_LIMIT = 3  # Max 3 tasks per user
-RATE_LIMIT_SECONDS = 15
-
-# Decorator to limit user request rate
-def rate_limited(func):
-    @wraps(func)
-    async def wrapper(client, message: Message):
-        user_id = message.from_user.id
-        now = time.time()
-        if user_id in THROTTLE_LIMIT and now - THROTTLE_LIMIT[user_id] < RATE_LIMIT_SECONDS:
-            return await message.reply_text("Please wait a few seconds before sending another request.")
-        THROTTLE_LIMIT[user_id] = now
-        await func(client, message)
-    return wrapper
+MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
 def download_with_ytdlp(url, download_dir="/tmp"):
     ydl_opts = {
@@ -51,7 +34,7 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
-def generate_thumbnail(file_path, output_thumb="/tmp/thumbs/thumb.jpg"):
+def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         import subprocess
         subprocess.run(
@@ -63,19 +46,23 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumbs/thumb.jpg"):
     except:
         return None
 
-def generate_preview_clip(file_path, output_clip="/tmp/thumbs/preview.mp4"):
-    try:
-        import subprocess
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", file_path, "-ss", "00:00:01", "-t", "00:00:05", output_clip],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        return output_clip if os.path.exists(output_clip) else None
-    except:
-        return None
+def split_file(file_path, part_size=MAX_FILE_SIZE):
+    part_files = []
+    base_name = os.path.basename(file_path)
+    with open(file_path, "rb") as f:
+        i = 1
+        while True:
+            chunk = f.read(part_size)
+            if not chunk:
+                break
+            part_path = f"{file_path}.part{i}"
+            with open(part_path, "wb") as pf:
+                pf.write(chunk)
+            part_files.append(part_path)
+            i += 1
+    return part_files
 
-async def auto_cleanup(path="/tmp", max_age=600):
+async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
     for filename in os.listdir(path):
         file_path = os.path.join(path, filename)
@@ -87,66 +74,79 @@ async def auto_cleanup(path="/tmp", max_age=600):
                 except:
                     pass
 
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "cancel"]))
-@rate_limited
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
-    user_id = message.from_user.id
     urls = message.text.strip().split()
+    try:
+        notice = await message.reply_text("Analyzing link(s)...")
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        notice = await message.reply_text("Analyzing link(s)...")
+
     valid_urls = [url for url in urls if url.lower().startswith("http")]
     if not valid_urls:
-        return await message.reply_text("No valid links detected.")
+        return await notice.edit("No valid links detected.")
 
-    if user_id in DOWNLOAD_QUEUE and len(DOWNLOAD_QUEUE[user_id]) >= QUEUE_LIMIT:
-        return await message.reply_text("You have too many pending tasks. Please wait.")
-
-    DOWNLOAD_QUEUE.setdefault(user_id, []).append(message)
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
     for url in valid_urls:
         filepath = None
         try:
-            notice = await message.reply_text(f"Starting download for: {url}")
+            await notice.delete()
+            processing = await message.reply_text(f"Downloading from:\n{url}")
             filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
 
-            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
-            if file_size_mb > MAX_FILE_SIZE_MB:
-                await message.reply_text(f"File too large to upload (> {MAX_FILE_SIZE_MB}MB). Skipping...")
-                os.remove(filepath)
-                continue
-
             ext = os.path.splitext(filepath)[1]
             caption = f"**Downloaded from:**\n{url}"
-            thumb = generate_thumbnail(filepath)
-            preview = generate_preview_clip(filepath)
-            if preview:
-                await message.reply_video(preview, caption="Preview Clip")
 
+            await processing.delete()
             uploading = await message.reply_text("Uploading...")
 
-            if ext.lower() in VIDEO_EXTENSIONS:
-                await message.reply_video(
-                    video=filepath,
-                    caption=caption,
-                    thumb=thumb if thumb else None
-                )
+            # যদি ফাইল বড় হয়
+            if os.path.getsize(filepath) > MAX_FILE_SIZE:
+                part_files = await asyncio.to_thread(split_file, filepath)
+                for idx, part in enumerate(part_files, 1):
+                    part_caption = f"{caption}\n**Part {idx}/{len(part_files)}**"
+                    if ext.lower() in VIDEO_EXTENSIONS:
+                        await message.reply_video(
+                            video=part,
+                            caption=part_caption
+                        )
+                    else:
+                        await message.reply_document(
+                            document=part,
+                            caption=part_caption
+                        )
+                    os.remove(part)
             else:
-                await message.reply_document(
-                    document=filepath,
-                    caption=caption
-                )
+                if ext.lower() in VIDEO_EXTENSIONS:
+                    thumb = generate_thumbnail(filepath)
+                    await message.reply_video(
+                        video=filepath,
+                        caption=caption,
+                        thumb=thumb if thumb else None
+                    )
+                else:
+                    await message.reply_document(
+                        document=filepath,
+                        caption=caption
+                    )
 
             await uploading.delete()
 
-            # Log event
+            # Log to admin channel
             user = message.from_user
+            file_size = format_bytes(os.path.getsize(filepath))
             log_text = (
                 f"**New Download Event**\n\n"
                 f"**User:** {user.mention} (`{user.id}`)\n"
                 f"**Link:** `{url}`\n"
                 f"**File Name:** `{os.path.basename(filepath)}`\n"
-                f"**Size:** `{format_bytes(os.path.getsize(filepath))}`\n"
+                f"**Size:** `{file_size}`\n"
+                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
                 f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
             )
             try:
@@ -164,22 +164,8 @@ async def auto_download_handler(bot: Client, message: Message):
             try:
                 if filepath and os.path.exists(filepath):
                     os.remove(filepath)
-                if os.path.exists("/tmp/thumbs/thumb.jpg"):
-                    os.remove("/tmp/thumbs/thumb.jpg")
-                if os.path.exists("/tmp/thumbs/preview.mp4"):
-                    os.remove("/tmp/thumbs/preview.mp4")
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
                 await auto_cleanup()
             except:
                 pass
-
-    if message in DOWNLOAD_QUEUE.get(user_id, []):
-        DOWNLOAD_QUEUE[user_id].remove(message)
-
-@Client.on_message(filters.private & filters.command("cancel"))
-async def cancel_handler(_, message: Message):
-    user_id = message.from_user.id
-    if user_id in DOWNLOAD_QUEUE and DOWNLOAD_QUEUE[user_id]:
-        DOWNLOAD_QUEUE[user_id].clear()
-        await message.reply_text("Your download queue has been cancelled.")
-    else:
-        await message.reply_text("You have no active tasks to cancel.")
