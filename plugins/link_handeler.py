@@ -11,7 +11,7 @@ from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB max upload size per part
+MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
 def is_social_media_url(url: str) -> bool:
     social_domains = [
@@ -56,6 +56,32 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
+
+def split_video_ffmpeg(input_file, part_size_bytes=2 * 1024 * 1024 * 1024, output_dir="/tmp"):
+    import subprocess
+    import math
+
+    total_size = os.path.getsize(input_file)
+    duration_cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", input_file
+    ]
+    duration = float(subprocess.check_output(duration_cmd).strip())
+    total_parts = math.ceil(total_size / part_size_bytes)
+    duration_per_part = duration / total_parts
+
+    output_paths = []
+    for i in range(total_parts):
+        start_time = i * duration_per_part
+        output_path = os.path.join(output_dir, f"split_part_{i + 1}.mp4")
+        cmd = [
+            "ffmpeg", "-ss", str(start_time), "-i", input_file,
+            "-t", str(duration_per_part), "-c", "copy", output_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(output_path):
+            output_paths.append(output_path)
+    return output_paths
 
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
@@ -103,7 +129,6 @@ async def auto_download_handler(bot: Client, message: Message):
             await notice.delete()
 
             if is_social_media_url(url):
-                # সোশ্যাল মিডিয়া লিংক - yt-dlp দিয়ে পুরো ডাউনলোড
                 processing = await message.reply_text(f"Downloading from (social media):\n{url}")
                 filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
                 if not os.path.exists(filepath):
@@ -117,11 +142,24 @@ async def auto_download_handler(bot: Client, message: Message):
 
                 if ext.lower() in VIDEO_EXTENSIONS:
                     thumb = generate_thumbnail(filepath)
-                    await message.reply_video(
-                        video=filepath,
-                        caption=caption,
-                        thumb=thumb if thumb else None
-                    )
+                    size = os.path.getsize(filepath)
+                    if size > MAX_PART_SIZE:
+                        parts = await asyncio.to_thread(split_video_ffmpeg, filepath)
+                        for idx, part in enumerate(parts, start=1):
+                            await message.reply_video(
+                                video=part,
+                                caption=f"{caption}\nPart {idx}",
+                                thumb=thumb if thumb else None
+                            )
+                            os.remove(part)
+                    else:
+                        await message.reply_video(
+                            video=filepath,
+                            caption=caption,
+                            thumb=thumb if thumb else None
+                        )
+                    if thumb and os.path.exists(thumb):
+                        os.remove(thumb)
                 else:
                     await message.reply_document(
                         document=filepath,
@@ -129,14 +167,10 @@ async def auto_download_handler(bot: Client, message: Message):
                     )
                 await uploading.delete()
 
-                # Clean up
                 if os.path.exists(filepath):
                     os.remove(filepath)
-                if os.path.exists("/tmp/thumb.jpg"):
-                    os.remove("/tmp/thumb.jpg")
 
             else:
-                # ডাইরেক্ট লিংক - পার্ট বাই পার্ট ডাউনলোড + আপলোড
                 processing = await message.reply_text(f"Fetching file info for direct link:\n{url}")
 
                 async with aiohttp.ClientSession() as session:
