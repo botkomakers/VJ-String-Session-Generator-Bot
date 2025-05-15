@@ -1,26 +1,25 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import LOG_CHANNEL
+from db import save_user
 from PIL import Image, ImageDraw, ImageFont
-import requests
 from io import BytesIO
+import requests
 import os
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # Render or system font path
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 def generate_user_image(name, username, user_id, profile_pic=None):
     img = Image.new("RGB", (800, 400), (30, 30, 30))
     draw = ImageDraw.Draw(img)
 
-    # Load profile picture if available
     if profile_pic:
         try:
-            pfp = Image.open(BytesIO(requests.get(profile_pic).content)).convert("RGB").resize((200, 200))
+            pfp = Image.open(profile_pic).convert("RGB").resize((200, 200))
             img.paste(pfp, (30, 100))
         except:
             pass
 
-    # Text overlay
     font_big = ImageFont.truetype(FONT_PATH, 40)
     font_small = ImageFont.truetype(FONT_PATH, 30)
 
@@ -33,19 +32,21 @@ def generate_user_image(name, username, user_id, profile_pic=None):
     img.save(temp_path)
     return temp_path
 
-
 @Client.on_message(filters.private & filters.command("start"))
 async def start_command(bot: Client, message: Message):
     user = message.from_user
+
+    # Save user to MongoDB
+    save_user(user.id, user.first_name, user.username)
+
     profile_photo = None
 
     try:
         photos = await bot.get_profile_photos(user.id, limit=1)
         if photos:
-            file = await bot.download_media(photos[0].file_id)
-            profile_photo = file
+            profile_photo = await bot.download_media(photos[0].file_id)
     except:
-        pass
+        profile_photo = None
 
     # Send welcome to user
     await message.reply_photo(
@@ -61,7 +62,7 @@ async def start_command(bot: Client, message: Message):
         ])
     )
 
-    # Generate and send user log image
+    # Generate and send log image
     image_path = generate_user_image(
         name=user.first_name,
         username=user.username,
