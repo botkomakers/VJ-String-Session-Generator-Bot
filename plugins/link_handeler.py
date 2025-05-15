@@ -13,7 +13,7 @@ from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_PART_SIZE = int(1.5 * 1024 * 1024 * 1024)  # 1.5 GB
 
 def is_social_media_url(url: str) -> bool:
     social_domains = [
@@ -73,7 +73,10 @@ def split_video_ffmpeg(input_file, part_size_bytes, output_dir="/tmp"):
         output_path = os.path.join(output_dir, f"split_part_{i + 1}.mp4")
         cmd = [
             "ffmpeg", "-ss", str(start_time), "-i", input_file,
-            "-t", str(duration_per_part), "-c", "copy", output_path
+            "-t", str(duration_per_part),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            output_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if os.path.exists(output_path):
