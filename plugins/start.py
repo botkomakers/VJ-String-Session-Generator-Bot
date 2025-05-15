@@ -1,35 +1,90 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from config import LOG_CHANNEL
+from PIL import Image, ImageDraw, ImageFont
+import requests
+from io import BytesIO
+import os
+
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # Render or system font path
+
+def generate_user_image(name, username, user_id, profile_pic=None):
+    img = Image.new("RGB", (800, 400), (30, 30, 30))
+    draw = ImageDraw.Draw(img)
+
+    # Load profile picture if available
+    if profile_pic:
+        try:
+            pfp = Image.open(BytesIO(requests.get(profile_pic).content)).convert("RGB").resize((200, 200))
+            img.paste(pfp, (30, 100))
+        except:
+            pass
+
+    # Text overlay
+    font_big = ImageFont.truetype(FONT_PATH, 40)
+    font_small = ImageFont.truetype(FONT_PATH, 30)
+
+    draw.text((260, 100), f"Name: {name}", font=font_big, fill="white")
+    draw.text((260, 160), f"Username: @{username}" if username else "Username: N/A", font=font_small, fill="white")
+    draw.text((260, 210), f"User ID: {user_id}", font=font_small, fill="white")
+    draw.text((260, 260), f"Joined via /start", font=font_small, fill="lightgreen")
+
+    temp_path = f"/tmp/{user_id}_info.jpg"
+    img.save(temp_path)
+    return temp_path
+
 
 @Client.on_message(filters.private & filters.command("start"))
-async def start_command(client: Client, message: Message):
+async def start_command(bot: Client, message: Message):
+    user = message.from_user
+    profile_photo = None
+
     try:
-        await message.reply_photo(
-            photo="https://i.ibb.co/rRj5vjLn/photo-2025-05-11-04-24-45-7504497537693253636.jpg",  # ইচ্ছামত পরিবর্তনযোগ্য
+        photos = await bot.get_profile_photos(user.id, limit=1)
+        if photos:
+            file = await bot.download_media(photos[0].file_id)
+            profile_photo = file
+    except:
+        pass
+
+    # Send welcome to user
+    await message.reply_photo(
+        photo="https://i.ibb.co/rRj5vjLn/photo-2025-05-11-04-24-45-7504497537693253636.jpg",
+        caption=(
+            f"👋 Hello {user.mention}!\n\n"
+            "Send me any video link and I'll fetch it for you!\n"
+            "**Supports:** YouTube, Facebook, Instagram, TikTok, etc."
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Support", url="https://t.me/your_support_group")],
+            [InlineKeyboardButton("Updates", url="https://t.me/your_update_channel")]
+        ])
+    )
+
+    # Generate and send user log image
+    image_path = generate_user_image(
+        name=user.first_name,
+        username=user.username,
+        user_id=user.id,
+        profile_pic=profile_photo
+    )
+
+    try:
+        await bot.send_photo(
+            chat_id=LOG_CHANNEL,
+            photo=image_path,
             caption=(
-                "**👋 Welcome to the Ultimate Downloader Bot!**\n\n"
-                "Easily download videos from **any platform** with just a link.\n\n"
-                "**✅ Supported Platforms:**\n"
-                "• YouTube, Facebook, Instagram, TikTok, Twitter\n"
-                "• Pinterest, Reddit, Likee, IMDB trailers\n"
-                "• Direct video/file links (e.g., .mp4, .mov, etc.)\n\n"
-                "**⚡ Features:**\n"
-                "• Multiple links in one message\n"
-                "• Fast CDN-based downloads\n"
-                "• Smart auto-detection & format handling\n"
-                "• Auto thumbnail generation\n"
-                "• Upload as video/document intelligently\n\n"
-                "_Just send any video link, and let me handle the rest!_"
-            ),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("💬 Support", url="https://t.me/your_support_group"),
-                    InlineKeyboardButton("📢 Updates", url="https://t.me/your_update_channel")
-                ],
-                [
-                    InlineKeyboardButton("➕ Add to Group", url=f"https://t.me/{client.me.username}?startgroup=true")
-                ]
-            ])
+                f"**New User Started Bot!**\n\n"
+                f"**Name:** {user.first_name}\n"
+                f"**Username:** @{user.username if user.username else 'N/A'}\n"
+                f"**ID:** `{user.id}`\n"
+                f"**Link:** [Click Here](tg://user?id={user.id})"
+            )
         )
     except Exception as e:
-        await message.reply_text(f"❌ Error sending start message:\n\n`{e}`")
+        print(f"Failed to send log image: {e}")
+    finally:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        if profile_photo and os.path.exists(profile_photo):
+            os.remove(profile_photo)
