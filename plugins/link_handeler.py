@@ -11,11 +11,9 @@ from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-
-MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB max upload size per part
 
 def is_social_media_url(url: str) -> bool:
-    # খুব সহজ ফিল্টার, তোমার প্রয়োজনে আরও যোগ করতে পারো
     social_domains = [
         "youtube.com", "youtu.be",
         "facebook.com", "fb.watch",
@@ -105,7 +103,7 @@ async def auto_download_handler(bot: Client, message: Message):
             await notice.delete()
 
             if is_social_media_url(url):
-                # সোশ্যাল মিডিয়া লিংক - পুরোটাই yt-dlp দিয়ে ডাউনলোড
+                # সোশ্যাল মিডিয়া লিংক - yt-dlp দিয়ে পুরো ডাউনলোড
                 processing = await message.reply_text(f"Downloading from (social media):\n{url}")
                 filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
                 if not os.path.exists(filepath):
