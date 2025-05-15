@@ -7,21 +7,20 @@ import time
 import yt_dlp
 import math
 import subprocess
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
+
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-MAX_PART_SIZE = int(1.5 * 1024 * 1024 * 1024)  # 1.5 GB
+MAX_PART_SIZE = 1.5 * 1024 * 1024 * 1024  # 1.5 GB
 
 def is_social_media_url(url: str) -> bool:
     social_domains = [
-        "youtube.com", "youtu.be",
-        "facebook.com", "fb.watch",
-        "instagram.com", "tiktok.com",
-        "twitter.com", "vimeo.com",
-        "dailymotion.com"
+        "youtube.com", "youtu.be", "facebook.com", "fb.watch",
+        "instagram.com", "tiktok.com", "twitter.com", "vimeo.com", "dailymotion.com"
     ]
     return any(domain in url.lower() for domain in social_domains)
 
@@ -48,6 +47,19 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
+def get_video_duration(file_path):
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+             "default=noprint_wrappers=1:nokey=1", file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return int(float(result.stdout.strip()))
+    except:
+        return 0
+
 def format_bytes(size):
     power = 1024
     n = 0
@@ -60,8 +72,8 @@ def format_bytes(size):
 def split_video_ffmpeg(input_file, part_size_bytes, output_dir="/tmp"):
     total_size = os.path.getsize(input_file)
     duration_cmd = [
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", input_file
+        "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+        "default=noprint_wrappers=1:nokey=1", input_file
     ]
     duration = float(subprocess.check_output(duration_cmd).strip())
     total_parts = math.ceil(total_size / part_size_bytes)
@@ -73,10 +85,7 @@ def split_video_ffmpeg(input_file, part_size_bytes, output_dir="/tmp"):
         output_path = os.path.join(output_dir, f"split_part_{i + 1}.mp4")
         cmd = [
             "ffmpeg", "-ss", str(start_time), "-i", input_file,
-            "-t", str(duration_per_part),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            output_path
+            "-t", str(duration_per_part), "-c", "copy", output_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if os.path.exists(output_path):
@@ -136,7 +145,6 @@ async def auto_download_handler(bot: Client, message: Message):
 
                 ext = os.path.splitext(filepath)[1]
                 caption = f"**Downloaded from:**\n{url}"
-
                 await processing.edit("Uploading...")
                 thumb = generate_thumbnail(filepath)
                 size = os.path.getsize(filepath)
@@ -147,18 +155,19 @@ async def auto_download_handler(bot: Client, message: Message):
                         await message.reply_video(
                             video=part,
                             caption=f"{caption}\n**Part {idx}**",
-                            thumb=thumb if thumb else None
+                            thumb=thumb if thumb else None,
+                            duration=get_video_duration(part)
                         )
                         os.remove(part)
                 else:
                     await message.reply_video(
                         video=filepath,
                         caption=caption,
-                        thumb=thumb if thumb else None
+                        thumb=thumb if thumb else None,
+                        duration=get_video_duration(filepath)
                     )
 
-                if os.path.exists(filepath):
-                    os.remove(filepath)
+                os.remove(filepath)
                 if thumb and os.path.exists(thumb):
                     os.remove(thumb)
                 await processing.delete()
@@ -180,14 +189,21 @@ async def auto_download_handler(bot: Client, message: Message):
                     for i in range(total_parts):
                         start = i * MAX_PART_SIZE
                         end = min(start + MAX_PART_SIZE - 1, size - 1)
-                        part_path = f"/tmp/part_{i+1}"
+                        part_path = f"/tmp/part_{i+1}.mkv"
                         await download_part(session, url, start, end, part_path)
-                        await message.reply_document(part_path, caption=f"Part {i+1} of {total_parts}")
+                        thumb = generate_thumbnail(part_path)
+                        await message.reply_video(
+                            video=part_path,
+                            caption=f"**Direct Link Downloaded**\nPart {i+1} of {total_parts}",
+                            thumb=thumb if thumb else None,
+                            duration=get_video_duration(part_path)
+                        )
                         os.remove(part_path)
+                        if thumb and os.path.exists(thumb):
+                            os.remove(thumb)
 
                 await processing.delete()
 
-            # Logging
             user = message.from_user
             log_text = (
                 f"**New Download Event**\n\n"
