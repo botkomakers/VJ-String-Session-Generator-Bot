@@ -1,161 +1,156 @@
 import os
 import aiohttp
 import asyncio
-import math
-import subprocess
-from pyrogram import Client, filters
-
-MAX_PART_SIZE_MB = 1536  # 1.5 GB
-
-async def download_file(url, path):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            with open(path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(1024 * 1024):
-                    f.write(chunk)
-
-def split_by_size(input_file, output_dir, part_size_mb=1536):
-    os.makedirs(output_dir, exist_ok=True)
-    total_size = os.path.getsize(input_file)
-    part_size = part_size_mb * 1024 * 1024
-    total_parts = math.ceil(total_size / part_size)
-    part_paths = []
-
-    for i in range(total_parts):
-        start = i * part_size
-        output_path = os.path.join(output_dir, f"part_{i + 1}.mp4")
-
-        command = [
-            "ffmpeg", "-y", "-i", input_file,
-            "-ss", str(i * 900),
-            "-fs", str(part_size),
-            "-c", "copy", output_path
-        ]
-
-        try:
-            subprocess.run(command, check=True)
-            part_paths.append(output_path)
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Error splitting part {i+1}: {e}")
-            continue
-
-    return part_paths
-
-@Client.on_message(filters.command("dl") & filters.private)
-async def download_handler(client, message):
-    url = message.text.split(" ", 1)[1]
-    downloading = await message.reply("📥 Downloading video...")
-
-    temp_dir = "/tmp"
-    downloaded_path = os.path.join(temp_dir, "downloaded_video.mp4")
-
-    try:
-        await download_file(url, downloaded_path)
-        size_mb = os.path.getsize(downloaded_path) / (1024 * 1024)
-        await downloading.edit(f"📥 File size: {size_mb:.2f} MB\nSplitting by 1.5GB parts...")
-
-        parts = split_by_size(downloaded_path, temp_dir)
-        if not parts:
-            return await downloading.edit("❌ Failed to split the video.")
-
-        for i, part_path in enumerate(parts):
-            if os.path.exists(part_path):
-                await message.reply_video(part_path, caption=f"**Part {i+1}/{len(parts)}**", supports_streaming=True)
-                os.remove(part_path)
-            else:
-                await message.reply(f"❌ Part {i+1} missing!")
-
-        os.remove(downloaded_path)
-        await downloading.edit("✅ All parts sent successfully!")
-
-    except Exception as e:
-        await downloading.edit(f"❌ Error: {e}")
-
-
-
-
-
-
-import os
-import math
-import aiohttp
-import asyncio
-import subprocess
+import traceback
+import datetime
+import time
+import yt_dlp
+import threading
+import hashlib
+import mimetypes
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import FloodWait
+from config import LOG_CHANNEL, OWNER_ID
 
-MAX_SIZE_MB = 1536
-TEMP_DIR = "/tmp"
+VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+MAX_SIZE = 1.9 * 1024 * 1024 * 1024  # 1.9 GB
 
-async def download_file(url: str, path: str):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise Exception(f"Failed to download: HTTP {resp.status}")
-            with open(path, "wb") as f:
-                async for chunk in resp.content.iter_chunked(1024 * 1024):
-                    f.write(chunk)
+active_tasks = set()
+cache_dir = "/tmp/cache"
+os.makedirs(cache_dir, exist_ok=True)
 
-def get_size_mb(path):
-    return os.path.getsize(path) / (1024 * 1024)
+def hash_url(url: str) -> str:
+    return hashlib.md5(url.encode()).hexdigest()
 
-def split_video_by_size(input_path: str, output_dir: str, max_size_mb: int):
-    total_size = os.path.getsize(input_path)
-    part_size = max_size_mb * 1024 * 1024
-    total_parts = math.ceil(total_size / part_size)
-    part_paths = []
+def is_video(filename: str) -> bool:
+    ext = os.path.splitext(filename)[1].lower()
+    mime = mimetypes.guess_type(filename)[0]
+    return ext in VIDEO_EXTENSIONS or (mime and "video" in mime)
 
-    for i in range(total_parts):
-        part_path = os.path.join(output_dir, f"part_{i+1}.mp4")
-        command = [
-            "ffmpeg", "-y", "-i", input_path,
-            "-ss", str(i * 1800),  # 30 minutes estimate per part
-            "-fs", str(part_size),
-            "-c", "copy", part_path
-        ]
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(part_path):
-            part_paths.append(part_path)
+def format_bytes(size):
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
 
-    return part_paths
+def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
+    try:
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return output_thumb if os.path.exists(output_thumb) else None
+    except:
+        return None
 
-@Client.on_message(filters.private & filters.command("start"))
-async def start(client, message: Message):
-    await message.reply("Welcome! Just send a direct video link to download it.")
+def download_with_ytdlp(url, download_dir=cache_dir):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(id)s.%(ext)s"),
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
 
-@Client.on_message(filters.private & filters.text)
-async def handle_direct_link(client, message: Message):
-    url = message.text.strip()
-    if not url.startswith("http"):
-        return await message.reply("❌ Invalid link.")
+async def auto_cleanup(path=cache_dir, max_age=600):
+    now = time.time()
+    for filename in os.listdir(path):
+        file_path = os.path.join(path, filename)
+        if os.path.isfile(file_path):
+            age = now - os.path.getmtime(file_path)
+            if age > max_age:
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
 
-    tmp_video = os.path.join(TEMP_DIR, f"{message.from_user.id}_video.mp4")
-    status = await message.reply("📥 Downloading...")
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def handle_links(bot: Client, message: Message):
+    urls = [x for x in message.text.strip().split() if x.lower().startswith("http")]
+    if not urls:
+        return await message.reply_text("No valid links found.")
+
+    for url in urls:
+        task_id = hash_url(url)
+        if task_id in active_tasks:
+            await message.reply_text("This link is already being processed. Please wait...")
+            continue
+
+        active_tasks.add(task_id)
+        asyncio.create_task(process_url(bot, message, url, task_id))
+
+async def process_url(bot: Client, message: Message, url: str, task_id: str):
+    processing_msg = await message.reply_text("Processing your link...")
+    filepath = None
 
     try:
-        await download_file(url, tmp_video)
-        size = get_size_mb(tmp_video)
-        await status.edit(f"✅ Downloaded ({size:.2f} MB). Preparing to upload...")
+        filepath = await asyncio.to_thread(download_with_ytdlp, url)
+        if isinstance(filepath, tuple):
+            filepath, info = filepath
+        else:
+            raise Exception("Download failed.")
 
-        if size <= MAX_SIZE_MB:
-            await message.reply_video(tmp_video, caption="🎬 Here is your video!", supports_streaming=True)
-            os.remove(tmp_video)
+        if not os.path.exists(filepath):
+            raise Exception("Downloaded file not found.")
+
+        file_size = os.path.getsize(filepath)
+        if file_size > MAX_SIZE:
+            await processing_msg.edit(f"File too large to send (> 1.9 GB). Size: {format_bytes(file_size)}")
             return
 
-        await status.edit(f"🔧 Splitting {size:.2f}MB into 1.5GB parts...")
+        caption = f"**Downloaded From:** {url}"
+        thumb = generate_thumbnail(filepath)
 
-        parts = split_video_by_size(tmp_video, TEMP_DIR, MAX_SIZE_MB)
-        if not parts:
-            return await status.edit("❌ Failed to split the video.")
+        await processing_msg.edit("Uploading...")
 
-        for i, part in enumerate(parts):
-            await message.reply_video(part, caption=f"📤 Part {i+1}/{len(parts)}", supports_streaming=True)
-            os.remove(part)
+        if is_video(filepath):
+            await message.reply_video(
+                video=filepath,
+                caption=caption,
+                thumb=thumb if thumb else None,
+                supports_streaming=True
+            )
+        else:
+            await message.reply_document(
+                document=filepath,
+                caption=caption
+            )
 
-        os.remove(tmp_video)
-        await status.edit("✅ All parts uploaded successfully!")
+        await processing_msg.delete()
 
+        log_text = (
+            f"**New Download**\n\n"
+            f"**User:** {message.from_user.mention} (`{message.from_user.id}`)\n"
+            f"**Link:** `{url}`\n"
+            f"**File:** `{os.path.basename(filepath)}`\n"
+            f"**Size:** `{format_bytes(file_size)}`\n"
+            f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+        )
+        await bot.send_message(LOG_CHANNEL, log_text)
+
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        await process_url(bot, message, url, task_id)
     except Exception as e:
-        await status.edit(f"❌ Error: {e}")
-        if os.path.exists(tmp_video):
-            os.remove(tmp_video)
+        traceback.print_exc()
+        await processing_msg.edit(f"❌ Failed to download:\n{url}\n\n**{e}**")
+    finally:
+        try:
+            if filepath and os.path.exists(filepath):
+                os.remove(filepath)
+            if os.path.exists("/tmp/thumb.jpg"):
+                os.remove("/tmp/thumb.jpg")
+            await auto_cleanup()
+        except:
+            pass
+        active_tasks.discard(task_id)
