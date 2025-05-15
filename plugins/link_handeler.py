@@ -5,15 +5,26 @@ import traceback
 import datetime
 import time
 import yt_dlp
-import math
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2GB in bytes
 
+MAX_PART_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+
+def is_social_media_url(url: str) -> bool:
+    # খুব সহজ ফিল্টার, তোমার প্রয়োজনে আরও যোগ করতে পারো
+    social_domains = [
+        "youtube.com", "youtu.be",
+        "facebook.com", "fb.watch",
+        "instagram.com", "tiktok.com",
+        "twitter.com", "vimeo.com",
+        "dailymotion.com"
+    ]
+    url_lower = url.lower()
+    return any(domain in url_lower for domain in social_domains)
 
 def download_with_ytdlp(url, download_dir="/tmp"):
     ydl_opts = {
@@ -25,8 +36,7 @@ def download_with_ytdlp(url, download_dir="/tmp"):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-    return filename, info
-
+        return filename, info
 
 def format_bytes(size):
     power = 1024
@@ -36,7 +46,6 @@ def format_bytes(size):
         size /= power
         n += 1
     return f"{size:.2f} {units[n]}"
-
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
@@ -50,7 +59,6 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
     for filename in os.listdir(path):
@@ -63,26 +71,18 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-
-def split_file(filepath, part_size=MAX_PART_SIZE):
-    """Split file into parts of <= part_size bytes."""
-    file_size = os.path.getsize(filepath)
-    if file_size <= part_size:
-        return [filepath]
-    
-    parts = []
-    total_parts = math.ceil(file_size / part_size)
-    base_name, ext = os.path.splitext(filepath)
-    
-    with open(filepath, "rb") as f:
-        for i in range(total_parts):
-            part_path = f"{base_name}_part{i+1}{ext}"
-            with open(part_path, "wb") as pf:
-                chunk = f.read(part_size)
-                pf.write(chunk)
-            parts.append(part_path)
-    return parts
-
+async def download_part(session, url, start, end, part_path):
+    headers = {"Range": f"bytes={start}-{end}"}
+    async with session.get(url, headers=headers) as resp:
+        if resp.status in (200, 206):
+            with open(part_path, "wb") as f:
+                while True:
+                    chunk = await resp.content.read(1024*1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        else:
+            raise Exception(f"HTTP status {resp.status}")
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
@@ -93,84 +93,96 @@ async def auto_download_handler(bot: Client, message: Message):
         await asyncio.sleep(e.value)
         notice = await message.reply_text("Analyzing link(s)...")
 
-    valid_urls = [url for url in urls if url.lower().startswith("http")]  
-    if not valid_urls:  
-        return await notice.edit("No valid links detected.")  
+    valid_urls = [url for url in urls if url.lower().startswith("http")]
+    if not valid_urls:
+        return await notice.edit("No valid links detected.")
 
-    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")  
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
-    for url in valid_urls:  
-        filepath = None  
-        try:  
-            await notice.delete()  
-            processing = await message.reply_text(f"Downloading from:\n{url}")  
-            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)  
+    for url in valid_urls:
+        filepath = None
+        try:
+            await notice.delete()
 
-            if not os.path.exists(filepath):  
-                raise Exception("Download failed or file not found.")  
+            if is_social_media_url(url):
+                # সোশ্যাল মিডিয়া লিংক - পুরোটাই yt-dlp দিয়ে ডাউনলোড
+                processing = await message.reply_text(f"Downloading from (social media):\n{url}")
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
+                if not os.path.exists(filepath):
+                    raise Exception("Download failed or file not found.")
 
-            # Split file if bigger than MAX_PART_SIZE
-            parts = split_file(filepath, MAX_PART_SIZE)
+                ext = os.path.splitext(filepath)[1]
+                caption = f"**Downloaded from:**\n{url}"
 
-            await processing.delete()  
+                await processing.delete()
+                uploading = await message.reply_text("Uploading...")
 
-            for idx, part_path in enumerate(parts):
-                uploading = await message.reply_text(f"Uploading part {idx+1} of {len(parts)}...")
-                ext = os.path.splitext(part_path)[1]  
-                caption = f"**Downloaded from:**\n{url}\n**Part:** {idx+1} of {len(parts)}"  
+                if ext.lower() in VIDEO_EXTENSIONS:
+                    thumb = generate_thumbnail(filepath)
+                    await message.reply_video(
+                        video=filepath,
+                        caption=caption,
+                        thumb=thumb if thumb else None
+                    )
+                else:
+                    await message.reply_document(
+                        document=filepath,
+                        caption=caption
+                    )
+                await uploading.delete()
 
-                if ext.lower() in VIDEO_EXTENSIONS:  
-                    thumb = generate_thumbnail(part_path)  
-                    await message.reply_video(  
-                        video=part_path,  
-                        caption=caption,  
-                        thumb=thumb if thumb else None  
-                    )  
-                else:  
-                    await message.reply_document(  
-                        document=part_path,  
-                        caption=caption  
-                    )  
+                # Clean up
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
 
-                await uploading.delete()  
-                # Remove uploaded part
-                os.remove(part_path)
+            else:
+                # ডাইরেক্ট লিংক - পার্ট বাই পার্ট ডাউনলোড + আপলোড
+                processing = await message.reply_text(f"Fetching file info for direct link:\n{url}")
 
-            # Remove original file after all parts uploaded
-            if os.path.exists(filepath):
-                os.remove(filepath)
+                async with aiohttp.ClientSession() as session:
+                    async with session.head(url) as resp:
+                        if resp.status != 200:
+                            raise Exception("Invalid URL or unable to access file.")
+                        size = int(resp.headers.get("Content-Length", 0))
+                        if size == 0:
+                            raise Exception("Cannot determine file size.")
 
-            await auto_cleanup()  
+                    total_parts = (size // MAX_PART_SIZE) + 1
+                    await processing.edit(f"File size: {format_bytes(size)}. Splitting into {total_parts} part(s).")
 
-            # Log to admin channel  
-            user = message.from_user  
-            file_size = format_bytes(os.path.getsize(filepath) if os.path.exists(filepath) else 0)  
-            log_text = (  
-                f"**New Download Event**\n\n"  
-                f"**User:** {user.mention} (`{user.id}`)\n"  
-                f"**Link:** `{url}`\n"  
-                f"**File Name:** `{os.path.basename(filepath)}`\n"  
-                f"**Size:** `{file_size}`\n"  
-                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"  
-                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"  
-            )  
-            try:  
-                await bot.send_message(LOG_CHANNEL, log_text)  
-            except:  
-                pass  
+                    for i in range(total_parts):
+                        start = i * MAX_PART_SIZE
+                        end = min(start + MAX_PART_SIZE - 1, size - 1)
+                        part_path = f"/tmp/part_{i+1}"
+                        await download_part(session, url, start, end, part_path)
+                        await message.reply_document(part_path, caption=f"Part {i+1} of {total_parts}")
+                        os.remove(part_path)
 
-        except FloodWait as e:  
-            await asyncio.sleep(e.value)  
-            continue  
-        except Exception as e:  
-            traceback.print_exc()  
-            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")  
-        finally:  
-            try:  
-                if filepath and os.path.exists(filepath):  
-                    os.remove(filepath)  
-                if os.path.exists("/tmp/thumb.jpg"):  
-                    os.remove("/tmp/thumb.jpg")  
-                await auto_cleanup()  
-            except:  
+                await processing.delete()
+
+            # Log to admin channel
+            user = message.from_user
+            log_text = (
+                f"**New Download Event**\n\n"
+                f"**User:** {user.mention} (`{user.id}`)\n"
+                f"**Link:** `{url}`\n"
+                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+            )
+            try:
+                await bot.send_message(LOG_CHANNEL, log_text)
+            except:
+                pass
+
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
+        except Exception as e:
+            traceback.print_exc()
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+        finally:
+            try:
+                await auto_cleanup()
+            except:
                 pass
