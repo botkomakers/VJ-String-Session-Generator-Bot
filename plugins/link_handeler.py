@@ -10,10 +10,15 @@ from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
+DOWNLOAD_DIR = "/app/downloads"
+THUMB_PATH = os.path.join(DOWNLOAD_DIR, "thumb.jpg")
+
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
-def download_with_ytdlp(url, download_dir="/tmp"):
+def download_with_ytdlp(url, download_dir=DOWNLOAD_DIR):
     ydl_opts = {
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
@@ -34,7 +39,7 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
-def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
+def generate_thumbnail(file_path, output_thumb=THUMB_PATH):
     try:
         import subprocess
         subprocess.run(
@@ -48,7 +53,6 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
 
 def split_file(file_path, part_size=MAX_FILE_SIZE):
     part_files = []
-    base_name = os.path.basename(file_path)
     with open(file_path, "rb") as f:
         i = 1
         while True:
@@ -62,7 +66,7 @@ def split_file(file_path, part_size=MAX_FILE_SIZE):
             i += 1
     return part_files
 
-async def auto_cleanup(path="/tmp", max_age=300):
+async def auto_cleanup(path=DOWNLOAD_DIR, max_age=300):
     now = time.time()
     for filename in os.listdir(path):
         file_path = os.path.join(path, filename)
@@ -105,39 +109,24 @@ async def auto_download_handler(bot: Client, message: Message):
             await processing.delete()
             uploading = await message.reply_text("Uploading...")
 
-            # যদি ফাইল বড় হয়
             if os.path.getsize(filepath) > MAX_FILE_SIZE:
                 part_files = await asyncio.to_thread(split_file, filepath)
                 for idx, part in enumerate(part_files, 1):
                     part_caption = f"{caption}\n**Part {idx}/{len(part_files)}**"
                     if ext.lower() in VIDEO_EXTENSIONS:
-                        await message.reply_video(
-                            video=part,
-                            caption=part_caption
-                        )
+                        await message.reply_video(video=part, caption=part_caption)
                     else:
-                        await message.reply_document(
-                            document=part,
-                            caption=part_caption
-                        )
+                        await message.reply_document(document=part, caption=part_caption)
                     os.remove(part)
             else:
                 if ext.lower() in VIDEO_EXTENSIONS:
                     thumb = generate_thumbnail(filepath)
-                    await message.reply_video(
-                        video=filepath,
-                        caption=caption,
-                        thumb=thumb if thumb else None
-                    )
+                    await message.reply_video(video=filepath, caption=caption, thumb=thumb if thumb else None)
                 else:
-                    await message.reply_document(
-                        document=filepath,
-                        caption=caption
-                    )
+                    await message.reply_document(document=filepath, caption=caption)
 
             await uploading.delete()
 
-            # Log to admin channel
             user = message.from_user
             file_size = format_bytes(os.path.getsize(filepath))
             log_text = (
@@ -164,8 +153,8 @@ async def auto_download_handler(bot: Client, message: Message):
             try:
                 if filepath and os.path.exists(filepath):
                     os.remove(filepath)
-                if os.path.exists("/tmp/thumb.jpg"):
-                    os.remove("/tmp/thumb.jpg")
+                if os.path.exists(THUMB_PATH):
+                    os.remove(THUMB_PATH)
                 await auto_cleanup()
             except:
                 pass
