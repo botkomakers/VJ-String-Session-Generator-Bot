@@ -1,11 +1,10 @@
 import os
-import aiohttp
 import asyncio
 import traceback
 import time
 import yt_dlp
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message
 from collections import defaultdict, deque
 from config import LOG_CHANNEL
 from db import save_user
@@ -16,8 +15,22 @@ user_queues = defaultdict(deque)
 active_tasks = set()
 MAX_QUEUE_LENGTH = 5
 
-# User selection for format storage (user_id -> info dict)
-user_selection = {}
+def download_with_ytdlp(url, download_dir="/tmp"):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "postprocessors": [{
+            'key': 'FFmpegVideoConvertor',
+            'preferredformat': 'mp4',  # <-- এখানে বানান ঠিক
+        }],
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
 
 def format_bytes(size):
     power = 1024
@@ -35,7 +48,7 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
             "ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return output_thumb if os.path.exists(output_thumb) else None
-    except:
+    except Exception:
         return None
 
 async def auto_cleanup(path="/tmp", max_age=300):
@@ -47,56 +60,8 @@ async def auto_cleanup(path="/tmp", max_age=300):
             if age > max_age:
                 try:
                     os.remove(file_path)
-                except:
+                except Exception:
                     pass
-
-def get_formats_info(url):
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        formats = info.get("formats", [])
-        # Filter formats for video and audio with filesize info
-        video_formats = []
-        audio_formats = []
-        for f in formats:
-            if f.get('filesize') is None and f.get('filesize_approx'):
-                filesize = f['filesize_approx']
-            else:
-                filesize = f.get('filesize', 0)
-            ext = f.get("ext", "").lower()
-            # Video with video+audio
-            if f.get("vcodec") != "none" and f.get("acodec") != "none":
-                video_formats.append({
-                    "format_id": f["format_id"],
-                    "ext": ext,
-                    "resolution": f.get("format_note") or f.get("height"),
-                    "filesize": filesize,
-                    "format_note": f.get("format_note", "")
-                })
-            # Audio only
-            elif f.get("vcodec") == "none" and f.get("acodec") != "none":
-                audio_formats.append({
-                    "format_id": f["format_id"],
-                    "ext": ext,
-                    "abr": f.get("abr"),
-                    "filesize": filesize,
-                })
-        return info, video_formats, audio_formats
-
-async def download_format(url, format_id, download_dir="/tmp"):
-    ydl_opts = {
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-        "format": format_id,
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename, info
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start", "cancel"]))
 async def queue_video_download(bot: Client, message: Message):
@@ -114,79 +79,23 @@ async def queue_video_download(bot: Client, message: Message):
     if len(user_queues[user_id]) >= MAX_QUEUE_LENGTH:
         return await message.reply_text("⚠️ Queue full. Please wait...")
 
-    # First, get video and audio formats available
-    try:
-        info, video_formats, audio_formats = await asyncio.to_thread(get_formats_info, url)
-    except Exception as e:
-        return await message.reply_text(f"❌ Failed to fetch video info:\n{e}")
+    user_queues[user_id].append((message, url))
 
-    if not video_formats and not audio_formats:
-        return await message.reply_text("❌ No downloadable formats found.")
+    if user_id in active_tasks:
+        await message.reply_text("⏳ Added to queue. Please wait...")
+        return
 
-    # Save info and formats to user_selection for callback usage
-    user_selection[user_id] = {
-        "url": url,
-        "info": info,
-        "video_formats": video_formats,
-        "audio_formats": audio_formats
-    }
-
-    # Build buttons for video formats (show resolution and size)
-    buttons = []
-    for vf in video_formats:
-        size_text = format_bytes(vf["filesize"]) if vf["filesize"] else "Unknown size"
-        label = f"Video {vf.get('resolution') or vf['format_note']} ({vf['ext']}) {size_text}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"download_vid:{vf['format_id']}")])
-
-    # Add audio format buttons
-    for af in audio_formats:
-        size_text = format_bytes(af["filesize"]) if af["filesize"] else "Unknown size"
-        label = f"Audio {af.get('abr', '')}kbps ({af['ext']}) {size_text}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"download_aud:{af['format_id']}")])
-
-    await message.reply_text(
-        "Select the format to download:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-
-@Client.on_callback_query()
-async def format_callback(client: Client, callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    data = callback_query.data
-
-    if user_id not in user_selection:
-        return await callback_query.answer("Session expired or no selection found.", show_alert=True)
-
-    sel = user_selection[user_id]
-    url = sel["url"]
-
-    if data.startswith("download_vid:") or data.startswith("download_aud:"):
-        format_id = data.split(":", 1)[1]
-
-        # Add to queue
-        if len(user_queues[user_id]) >= MAX_QUEUE_LENGTH:
-            await callback_query.answer("⚠️ Your queue is full. Please wait.", show_alert=True)
-            return
-
-        user_queues[user_id].append((callback_query.message, url, format_id))
-        await callback_query.answer("Added to download queue.")
-        await callback_query.message.edit("⏳ Added to queue. Please wait...")
-
-        if user_id not in active_tasks:
-            active_tasks.add(user_id)
-            await process_user_queue(client, user_id)
-    else:
-        await callback_query.answer()
+    active_tasks.add(user_id)
+    await process_user_queue(bot, user_id)
 
 async def process_user_queue(bot: Client, user_id: int):
     while user_queues[user_id]:
-        message, url, format_id = user_queues[user_id].popleft()
-        processing = await message.reply_text("⏳ Processing your download...", quote=True)
+        message, url = user_queues[user_id].popleft()
+        processing = await message.reply_text("⏳ Processing your video...", quote=True)
         filepath = None
 
         try:
-            filepath, info = await asyncio.to_thread(download_format, url, format_id)
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed")
@@ -194,13 +103,14 @@ async def process_user_queue(bot: Client, user_id: int):
             ext = os.path.splitext(filepath)[1].lower()
             thumb = generate_thumbnail(filepath)
 
-            caption = f"✅ **Downloaded:** {info.get('title')}"
+            caption = f"✅ **Downloaded:** {info.get('title', 'No Title')}"
 
             if ext in VIDEO_EXTENSIONS:
                 sent_msg = await message.reply_video(
                     video=filepath,
                     caption=caption,
-                    thumb=thumb if thumb else None
+                    thumb=thumb if thumb else None,
+                    supports_streaming=True
                 )
             elif ext in AUDIO_EXTENSIONS:
                 sent_msg = await message.reply_audio(
@@ -238,4 +148,3 @@ async def process_user_queue(bot: Client, user_id: int):
             await auto_cleanup()
 
     active_tasks.remove(user_id)
-    user_selection.pop(user_id, None)
