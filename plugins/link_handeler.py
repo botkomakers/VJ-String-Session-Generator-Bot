@@ -5,6 +5,8 @@ import traceback
 import datetime
 import time
 import yt_dlp
+import math
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
@@ -21,8 +23,7 @@ def is_social_media_url(url: str) -> bool:
         "twitter.com", "vimeo.com",
         "dailymotion.com"
     ]
-    url_lower = url.lower()
-    return any(domain in url_lower for domain in social_domains)
+    return any(domain in url.lower() for domain in social_domains)
 
 def download_with_ytdlp(url, download_dir="/tmp"):
     ydl_opts = {
@@ -36,18 +37,8 @@ def download_with_ytdlp(url, download_dir="/tmp"):
         filename = ydl.prepare_filename(info)
         return filename, info
 
-def format_bytes(size):
-    power = 1024
-    n = 0
-    units = ['B', 'KB', 'MB', 'GB', 'TB']
-    while size > power and n < len(units) - 1:
-        size /= power
-        n += 1
-    return f"{size:.2f} {units[n]}"
-
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
-        import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
@@ -57,10 +48,16 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-def split_video_ffmpeg(input_file, part_size_bytes=2 * 1024 * 1024 * 1024, output_dir="/tmp"):
-    import subprocess
-    import math
+def format_bytes(size):
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
 
+def split_video_ffmpeg(input_file, part_size_bytes, output_dir="/tmp"):
     total_size = os.path.getsize(input_file)
     duration_cmd = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -129,7 +126,7 @@ async def auto_download_handler(bot: Client, message: Message):
             await notice.delete()
 
             if is_social_media_url(url):
-                processing = await message.reply_text(f"Downloading from (social media):\n{url}")
+                processing = await message.reply_text(f"Downloading from:\n{url}")
                 filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
                 if not os.path.exists(filepath):
                     raise Exception("Download failed or file not found.")
@@ -137,38 +134,31 @@ async def auto_download_handler(bot: Client, message: Message):
                 ext = os.path.splitext(filepath)[1]
                 caption = f"**Downloaded from:**\n{url}"
 
-                await processing.delete()
-                uploading = await message.reply_text("Uploading...")
+                await processing.edit("Uploading...")
+                thumb = generate_thumbnail(filepath)
+                size = os.path.getsize(filepath)
 
-                if ext.lower() in VIDEO_EXTENSIONS:
-                    thumb = generate_thumbnail(filepath)
-                    size = os.path.getsize(filepath)
-                    if size > MAX_PART_SIZE:
-                        parts = await asyncio.to_thread(split_video_ffmpeg, filepath)
-                        for idx, part in enumerate(parts, start=1):
-                            await message.reply_video(
-                                video=part,
-                                caption=f"{caption}\nPart {idx}",
-                                thumb=thumb if thumb else None
-                            )
-                            os.remove(part)
-                    else:
+                if size > MAX_PART_SIZE:
+                    parts = await asyncio.to_thread(split_video_ffmpeg, filepath, MAX_PART_SIZE)
+                    for idx, part in enumerate(parts, start=1):
                         await message.reply_video(
-                            video=filepath,
-                            caption=caption,
+                            video=part,
+                            caption=f"{caption}\n**Part {idx}**",
                             thumb=thumb if thumb else None
                         )
-                    if thumb and os.path.exists(thumb):
-                        os.remove(thumb)
+                        os.remove(part)
                 else:
-                    await message.reply_document(
-                        document=filepath,
-                        caption=caption
+                    await message.reply_video(
+                        video=filepath,
+                        caption=caption,
+                        thumb=thumb if thumb else None
                     )
-                await uploading.delete()
 
                 if os.path.exists(filepath):
                     os.remove(filepath)
+                if thumb and os.path.exists(thumb):
+                    os.remove(thumb)
+                await processing.delete()
 
             else:
                 processing = await message.reply_text(f"Fetching file info for direct link:\n{url}")
@@ -181,7 +171,7 @@ async def auto_download_handler(bot: Client, message: Message):
                         if size == 0:
                             raise Exception("Cannot determine file size.")
 
-                    total_parts = (size // MAX_PART_SIZE) + 1
+                    total_parts = math.ceil(size / MAX_PART_SIZE)
                     await processing.edit(f"File size: {format_bytes(size)}. Splitting into {total_parts} part(s).")
 
                     for i in range(total_parts):
@@ -194,7 +184,7 @@ async def auto_download_handler(bot: Client, message: Message):
 
                 await processing.delete()
 
-            # Log to admin channel
+            # Logging
             user = message.from_user
             log_text = (
                 f"**New Download Event**\n\n"
