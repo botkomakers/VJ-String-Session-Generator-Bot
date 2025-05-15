@@ -73,6 +73,7 @@ async def auto_download_handler(bot: Client, message: Message):
     await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
     for url in valid_urls:
+        filepath = None
         try:
             await notice.delete()
             processing = await message.reply_text(f"Downloading from:\n{url}")
@@ -84,20 +85,23 @@ async def auto_download_handler(bot: Client, message: Message):
             ext = os.path.splitext(filepath)[1]
             caption = f"**Downloaded from:**\n{url}"
 
+            await processing.delete()
+            uploading = await message.reply_text("Uploading...")
+
             if ext.lower() in VIDEO_EXTENSIONS:
                 thumb = generate_thumbnail(filepath)
-                await processing.delete()
                 await message.reply_video(
                     video=filepath,
                     caption=caption,
                     thumb=thumb if thumb else None
                 )
             else:
-                await processing.delete()
                 await message.reply_document(
                     document=filepath,
                     caption=caption
                 )
+
+            await uploading.delete()
 
             # Log to admin channel
             user = message.from_user
@@ -124,7 +128,7 @@ async def auto_download_handler(bot: Client, message: Message):
             await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
         finally:
             try:
-                if os.path.exists(filepath):
+                if filepath and os.path.exists(filepath):
                     os.remove(filepath)
                 if os.path.exists("/tmp/thumb.jpg"):
                     os.remove("/tmp/thumb.jpg")
