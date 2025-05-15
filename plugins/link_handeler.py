@@ -1,96 +1,137 @@
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from config import LOG_CHANNEL
-from PIL import Image, ImageDraw, ImageFont
 import os
+import aiohttp
+import asyncio
+import traceback
+import datetime
+import time
+import yt_dlp
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from pyrogram.errors import FloodWait
+from config import LOG_CHANNEL
 
-from db import save_user, has_been_notified, set_notified  # Ensure these are implemented properly
+VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+def download_with_ytdlp(url, download_dir="/tmp"):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
 
-def generate_user_image(name, username, user_id, profile_pic=None):
-    img = Image.new("RGB", (800, 400), (30, 30, 30))
-    draw = ImageDraw.Draw(img)
+def format_bytes(size):
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
 
-    if profile_pic:
-        try:
-            pfp = Image.open(profile_pic).convert("RGB").resize((200, 200))
-            img.paste(pfp, (30, 100))
-        except Exception as e:
-            print(f"Profile pic paste error: {e}")
-
-    font_big = ImageFont.truetype(FONT_PATH, 40)
-    font_small = ImageFont.truetype(FONT_PATH, 30)
-
-    draw.text((260, 100), f"Name: {name}", font=font_big, fill="white")
-    draw.text((260, 160), f"Username: @{username}" if username else "Username: N/A", font=font_small, fill="white")
-    draw.text((260, 210), f"User ID: {user_id}", font=font_small, fill="white")
-    draw.text((260, 260), f"Joined via /start", font=font_small, fill="lightgreen")
-
-    temp_path = f"/tmp/{user_id}_info.jpg"
-    img.save(temp_path)
-    return temp_path
-
-
-@Client.on_message(filters.private & filters.command("start"))
-async def start_command(bot: Client, message: Message):
-    user = message.from_user
-    user_id = user.id
-    profile_photo_path = None
-
-    # Save user
-    save_user(user_id, user.first_name, user.username)
-
-    # Only if not notified before
-    if not has_been_notified(user_id):
-        # Get profile photo
-        try:
-            photos = await bot.get_profile_photos(user_id, limit=1)
-            if photos:
-                profile_photo_path = await bot.download_media(photos[0].file_id)
-        except Exception as e:
-            print(f"Profile photo fetch failed: {e}")
-
-        # Generate image
-        image_path = generate_user_image(
-            name=user.first_name,
-            username=user.username,
-            user_id=user_id,
-            profile_pic=profile_photo_path
+def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
+    try:
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
+        return output_thumb if os.path.exists(output_thumb) else None
+    except:
+        return None
 
-        # Send log to channel
+async def auto_cleanup(path="/tmp", max_age=300):
+    now = time.time()
+    for filename in os.listdir(path):
+        file_path = os.path.join(path, filename)
+        if os.path.isfile(file_path):
+            age = now - os.path.getmtime(file_path)
+            if age > max_age:
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def auto_download_handler(bot: Client, message: Message):
+    urls = message.text.strip().split()
+    try:
+        notice = await message.reply_text("Analyzing link(s)...")
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        notice = await message.reply_text("Analyzing link(s)...")
+
+    valid_urls = [url for url in urls if url.lower().startswith("http")]
+    if not valid_urls:
+        return await notice.edit("No valid links detected.")
+
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
+
+    for url in valid_urls:
+        filepath = None
         try:
-            await bot.send_photo(
-                chat_id=LOG_CHANNEL,
-                photo=image_path,
-                caption=(
-                    f"**New User Started Bot!**\n\n"
-                    f"**Name:** {user.first_name}\n"
-                    f"**Username:** @{user.username if user.username else 'N/A'}\n"
-                    f"**ID:** `{user_id}`\n"
-                    f"**Link:** [Click Here](tg://user?id={user_id})"
-                )
-            )
-            set_notified(user_id)
-        except Exception as e:
-            print(f"Log sending failed: {e}")
-        finally:
-            if image_path and os.path.exists(image_path):
-                os.remove(image_path)
-            if profile_photo_path and os.path.exists(profile_photo_path):
-                os.remove(profile_photo_path)
+            await notice.delete()
+            processing = await message.reply_text(f"Downloading from:\n{url}")
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
-    # Send welcome message to user (always)
-    await message.reply_photo(
-        photo="https://i.ibb.co/rRj5vjLn/photo-2025-05-11-04-24-45-7504497537693253636.jpg",
-        caption=(
-            f"👋 Hello {user.mention}!\n\n"
-            "Send me any video link and I'll fetch it for you!\n"
-            "**Supports:** YouTube, Facebook, Instagram, TikTok, etc."
-        ),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Support", url="https://t.me/your_support_group")],
-            [InlineKeyboardButton("Updates", url="https://t.me/your_update_channel")]
-        ])
-    )
+            if not os.path.exists(filepath):
+                raise Exception("Download failed or file not found.")
+
+            ext = os.path.splitext(filepath)[1]
+            caption = f"**Downloaded from:**\n{url}"
+
+            await processing.delete()
+            uploading = await message.reply_text("Uploading...")
+
+            if ext.lower() in VIDEO_EXTENSIONS:
+                thumb = generate_thumbnail(filepath)
+                await message.reply_video(
+                    video=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None
+                )
+            else:
+                await message.reply_document(
+                    document=filepath,
+                    caption=caption
+                )
+
+            await uploading.delete()
+
+            # Log to admin channel
+            user = message.from_user
+            file_size = format_bytes(os.path.getsize(filepath))
+            log_text = (
+                f"**New Download Event**\n\n"
+                f"**User:** {user.mention} (`{user.id}`)\n"
+                f"**Link:** `{url}`\n"
+                f"**File Name:** `{os.path.basename(filepath)}`\n"
+                f"**Size:** `{file_size}`\n"
+                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+            )
+            try:
+                await bot.send_message(LOG_CHANNEL, log_text)
+            except:
+                pass
+
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
+        except Exception as e:
+            traceback.print_exc()
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+        finally:
+            try:
+                if filepath and os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
+                await auto_cleanup()
+            except:
+                pass
