@@ -18,3 +18,4 @@ aiohttp
 aiofiles
 pyTelegramBotAPI==4.9.0
 aioredis==2.0.1
+pillow
