@@ -6,22 +6,41 @@ import datetime
 import time
 import yt_dlp
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-from collections import defaultdict, deque
 from config import LOG_CHANNEL
-from db import save_user
+from functools import wraps
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-user_queues = defaultdict(deque)
-active_tasks = set()
-MAX_QUEUE_LENGTH = 5
+DOWNLOAD_QUEUE = {}
+THROTTLE_LIMIT = {}  # user_id: timestamp
+MAX_FILE_SIZE_MB = 2048  # 2GB
+QUEUE_LIMIT = 3  # Max 3 tasks per user
+RATE_LIMIT_SECONDS = 15
 
-FORMAT_OPTIONS = {
-    "mp4": "bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best",
-    "mp3": "bestaudio[ext=m4a]/bestaudio/best",
-    "best": "best"
-}
+# Decorator to limit user request rate
+def rate_limited(func):
+    @wraps(func)
+    async def wrapper(client, message: Message):
+        user_id = message.from_user.id
+        now = time.time()
+        if user_id in THROTTLE_LIMIT and now - THROTTLE_LIMIT[user_id] < RATE_LIMIT_SECONDS:
+            return await message.reply_text("Please wait a few seconds before sending another request.")
+        THROTTLE_LIMIT[user_id] = now
+        await func(client, message)
+    return wrapper
+
+def download_with_ytdlp(url, download_dir="/tmp"):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
 
 def format_bytes(size):
     power = 1024
@@ -32,30 +51,31 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
-def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
+def generate_thumbnail(file_path, output_thumb="/tmp/thumbs/thumb.jpg"):
     try:
         import subprocess
-        subprocess.run([
-            "ffmpeg", "-i", file_path, "-ss", "00:00:01.000",
-            "-vframes", "1", output_thumb
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
 
-def download_with_ytdlp(url, format_key="mp4", download_dir="/tmp"):
-    ydl_opts = {
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-        "format": FORMAT_OPTIONS.get(format_key, "best"),
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename, info
+def generate_preview_clip(file_path, output_clip="/tmp/thumbs/preview.mp4"):
+    try:
+        import subprocess
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", file_path, "-ss", "00:00:01", "-t", "00:00:05", output_clip],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return output_clip if os.path.exists(output_clip) else None
+    except:
+        return None
 
-async def auto_cleanup(path="/tmp", max_age=300):
+async def auto_cleanup(path="/tmp", max_age=600):
     now = time.time()
     for filename in os.listdir(path):
         file_path = os.path.join(path, filename)
@@ -68,100 +88,98 @@ async def auto_cleanup(path="/tmp", max_age=300):
                     pass
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start", "cancel"]))
-async def handle_link(bot: Client, message: Message):
+@rate_limited
+async def auto_download_handler(bot: Client, message: Message):
     user_id = message.from_user.id
-    url = message.text.strip()
-    save_user(user_id, message.from_user.first_name, message.from_user.username)
+    urls = message.text.strip().split()
+    valid_urls = [url for url in urls if url.lower().startswith("http")]
+    if not valid_urls:
+        return await message.reply_text("No valid links detected.")
 
-    if len(user_queues[user_id]) >= MAX_QUEUE_LENGTH:
-        await message.reply_text("⚠️ Your queue is full (Max 5 tasks). Please wait or use /cancel.")
-        return
+    if user_id in DOWNLOAD_QUEUE and len(DOWNLOAD_QUEUE[user_id]) >= QUEUE_LIMIT:
+        return await message.reply_text("You have too many pending tasks. Please wait.")
 
-    user_queues[user_id].append((message, url))
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("MP4", callback_data=f"format:mp4|{user_id}"),
-            InlineKeyboardButton("MP3", callback_data=f"format:mp3|{user_id}"),
-            InlineKeyboardButton("Best", callback_data=f"format:best|{user_id}")
-        ]
-    ])
-    await message.reply_text("Select a format to download:", reply_markup=keyboard)
+    DOWNLOAD_QUEUE.setdefault(user_id, []).append(message)
 
-@Client.on_callback_query(filters.regex(r"^format:(mp4|mp3|best)\|\d+$"))
-async def process_format(bot: Client, query: CallbackQuery):
-    format_key, uid = query.data.split(":")[1].split("|")
-    user_id = int(uid)
-
-    if query.from_user.id != user_id:
-        await query.answer("This is not for you.", show_alert=True)
-        return
-
-    if user_id in active_tasks:
-        await query.message.reply_text("⏳ Added to queue. Processing previous task...")
-        return
-
-    active_tasks.add(user_id)
-    await query.message.edit_text("▶️ Download starting in background...")
-    await process_user_queue(bot, user_id, format_key)
-
-async def process_user_queue(bot: Client, user_id: int, format_key="mp4"):
-    while user_queues[user_id]:
-        message, url = user_queues[user_id].popleft()
-        reply = await message.reply_text("Processing your video...")
+    for url in valid_urls:
         filepath = None
-
         try:
-            filepath, info = await asyncio.to_thread(download_with_ytdlp, url, format_key)
+            notice = await message.reply_text(f"Starting download for: {url}")
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
+
             if not os.path.exists(filepath):
-                raise Exception("Download failed")
+                raise Exception("Download failed or file not found.")
 
-            ext = os.path.splitext(filepath)[1].lower()
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+            if file_size_mb > MAX_FILE_SIZE_MB:
+                await message.reply_text(f"File too large to upload (> {MAX_FILE_SIZE_MB}MB). Skipping...")
+                os.remove(filepath)
+                continue
+
+            ext = os.path.splitext(filepath)[1]
+            caption = f"**Downloaded from:**\n{url}"
             thumb = generate_thumbnail(filepath)
+            preview = generate_preview_clip(filepath)
+            if preview:
+                await message.reply_video(preview, caption="Preview Clip")
 
-            caption = f"✅ **Downloaded:** {info.get('title')}\n**Requested by:** {message.from_user.mention}"
+            uploading = await message.reply_text("Uploading...")
 
-            # ভিডিও ফাইল হলে ভিডিও হিসেবে পাঠাও, অন্যথায় ডকুমেন্ট হিসেবে
-            if ext in VIDEO_EXTENSIONS and format_key != "mp3":
-                sent = await message.reply_video(
+            if ext.lower() in VIDEO_EXTENSIONS:
+                await message.reply_video(
                     video=filepath,
-                    caption=caption,
-                    thumb=thumb if thumb else None,
-                    supports_streaming=True
-                )
-            else:
-                sent = await message.reply_document(
-                    document=filepath,
                     caption=caption,
                     thumb=thumb if thumb else None
                 )
+            else:
+                await message.reply_document(
+                    document=filepath,
+                    caption=caption
+                )
 
-            forwarded = await sent.copy(chat_id=LOG_CHANNEL)
+            await uploading.delete()
+
+            # Log event
+            user = message.from_user
             log_text = (
-                f"**User:** [{message.from_user.first_name}](tg://user?id={user_id}) (`{user_id}`)\n"
+                f"**New Download Event**\n\n"
+                f"**User:** {user.mention} (`{user.id}`)\n"
                 f"**Link:** `{url}`\n"
-                f"**File:** `{os.path.basename(filepath)}`\n"
-                f"**Size:** `{format_bytes(os.path.getsize(filepath))}`"
+                f"**File Name:** `{os.path.basename(filepath)}`\n"
+                f"**Size:** `{format_bytes(os.path.getsize(filepath))}`\n"
+                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
             )
-            await bot.send_message(LOG_CHANNEL, log_text, reply_to_message_id=forwarded.id)
+            try:
+                await bot.send_message(LOG_CHANNEL, log_text)
+            except:
+                pass
 
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
         except Exception as e:
             traceback.print_exc()
-            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**Error:** {e}")
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
         finally:
-            await reply.delete()
-            if filepath and os.path.exists(filepath):
-                os.remove(filepath)
-            if os.path.exists("/tmp/thumb.jpg"):
-                os.remove("/tmp/thumb.jpg")
-            await auto_cleanup()
+            try:
+                if filepath and os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumbs/thumb.jpg"):
+                    os.remove("/tmp/thumbs/thumb.jpg")
+                if os.path.exists("/tmp/thumbs/preview.mp4"):
+                    os.remove("/tmp/thumbs/preview.mp4")
+                await auto_cleanup()
+            except:
+                pass
 
-    active_tasks.remove(user_id)
+    if message in DOWNLOAD_QUEUE.get(user_id, []):
+        DOWNLOAD_QUEUE[user_id].remove(message)
 
 @Client.on_message(filters.private & filters.command("cancel"))
-async def cancel_user_queue(bot: Client, message: Message):
+async def cancel_handler(_, message: Message):
     user_id = message.from_user.id
-    if user_id in user_queues:
-        user_queues[user_id].clear()
-        await message.reply_text("✅ Your queue has been cleared.")
+    if user_id in DOWNLOAD_QUEUE and DOWNLOAD_QUEUE[user_id]:
+        DOWNLOAD_QUEUE[user_id].clear()
+        await message.reply_text("Your download queue has been cancelled.")
     else:
-        await message.reply_text("Your queue is already empty.")
+        await message.reply_text("You have no active tasks to cancel.")
