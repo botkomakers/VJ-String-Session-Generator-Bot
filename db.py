@@ -2,7 +2,7 @@ from pymongo import MongoClient
 from config import MONGO_DB_URI
 
 client = MongoClient(MONGO_DB_URI)
-db = client["video_downloader"]
+db = client["universal_video_bot"]
 users = db["users"]
 
 def save_user(user_id, name, username):
