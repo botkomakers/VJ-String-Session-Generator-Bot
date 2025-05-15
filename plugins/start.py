@@ -1,13 +1,14 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import LOG_CHANNEL
-from db import save_user
 from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
 import requests
+from io import BytesIO
 import os
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+from db import save_user, has_been_notified, set_notified  # Make sure you have db.py set up
+
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # Adjust as needed
 
 def generate_user_image(name, username, user_id, profile_pic=None):
     img = Image.new("RGB", (800, 400), (30, 30, 30))
@@ -32,23 +33,24 @@ def generate_user_image(name, username, user_id, profile_pic=None):
     img.save(temp_path)
     return temp_path
 
+
 @Client.on_message(filters.private & filters.command("start"))
 async def start_command(bot: Client, message: Message):
     user = message.from_user
+    profile_photo = None
 
     # Save user to MongoDB
     save_user(user.id, user.first_name, user.username)
 
-    profile_photo = None
-
+    # Download profile photo
     try:
         photos = await bot.get_profile_photos(user.id, limit=1)
         if photos:
             profile_photo = await bot.download_media(photos[0].file_id)
     except:
-        profile_photo = None
+        pass
 
-    # Send welcome to user
+    # Send welcome message to user
     await message.reply_photo(
         photo="https://i.ibb.co/rRj5vjLn/photo-2025-05-11-04-24-45-7504497537693253636.jpg",
         caption=(
@@ -62,30 +64,32 @@ async def start_command(bot: Client, message: Message):
         ])
     )
 
-    # Generate and send log image
-    image_path = generate_user_image(
-        name=user.first_name,
-        username=user.username,
-        user_id=user.id,
-        profile_pic=profile_photo
-    )
-
-    try:
-        await bot.send_photo(
-            chat_id=LOG_CHANNEL,
-            photo=image_path,
-            caption=(
-                f"**New User Started Bot!**\n\n"
-                f"**Name:** {user.first_name}\n"
-                f"**Username:** @{user.username if user.username else 'N/A'}\n"
-                f"**ID:** `{user.id}`\n"
-                f"**Link:** [Click Here](tg://user?id={user.id})"
-            )
+    # Send log only if not already notified
+    if not has_been_notified(user.id):
+        image_path = generate_user_image(
+            name=user.first_name,
+            username=user.username,
+            user_id=user.id,
+            profile_pic=profile_photo
         )
-    except Exception as e:
-        print(f"Failed to send log image: {e}")
-    finally:
-        if os.path.exists(image_path):
-            os.remove(image_path)
-        if profile_photo and os.path.exists(profile_photo):
-            os.remove(profile_photo)
+
+        try:
+            await bot.send_photo(
+                chat_id=LOG_CHANNEL,
+                photo=image_path,
+                caption=(
+                    f"**New User Started Bot!**\n\n"
+                    f"**Name:** {user.first_name}\n"
+                    f"**Username:** @{user.username if user.username else 'N/A'}\n"
+                    f"**ID:** `{user.id}`\n"
+                    f"**Link:** [Click Here](tg://user?id={user.id})"
+                )
+            )
+            set_notified(user.id)
+        except Exception as e:
+            print(f"Failed to send log image: {e}")
+        finally:
+            if os.path.exists(image_path):
+                os.remove(image_path)
+            if profile_photo and os.path.exists(profile_photo):
+                os.remove(profile_photo)
