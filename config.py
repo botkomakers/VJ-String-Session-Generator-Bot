@@ -8,6 +8,10 @@ COOKIE_FILE = "cookies.txt"  # path to cookies file
 
 ADMINS = int(os.environ.get("ADMINS", 7862181538))
 
+ADMIN_ID = 7862181538          # Replace with your admin user ID
+
+
+
 # Telegram Account Api Id And Api Hash
 API_ID = int(environ.get("API_ID", "20591811"))
 API_HASH = environ.get("API_HASH", "")
