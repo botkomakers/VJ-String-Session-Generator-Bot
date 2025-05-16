@@ -14,7 +14,7 @@ from config import LOG_CHANNEL, ADMINS
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 USER_QUOTA = {}
 MAX_DAILY_QUOTA = 2 * 1024 * 1024 * 1024  # 2 GB
-active_downloads = {}
+ACTIVE_DOWNLOADS = set()
 
 def format_bytes(size):
     power = 1024
@@ -30,18 +30,17 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
         import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
 
-def progress_hook(d):
-    if d['status'] == 'downloading':
-        print(f"[Downloading] {d['_percent_str']} of {d['_total_bytes_str']} at {d['_speed_str']}")
-    elif d['status'] == 'finished':
-        print("[Download complete]", d['filename'])
+def get_unique_filename(info, download_dir="/tmp"):
+    title = info.get("title") or "video"
+    ext = info.get("ext") or "mp4"
+    uid = hashlib.md5(title.encode()).hexdigest()[:6]
+    return os.path.join(download_dir, f"{title}_{uid}.{ext}")
 
 def build_ydl_opts(url, download_dir="/tmp", quality="best"):
     return {
@@ -50,22 +49,21 @@ def build_ydl_opts(url, download_dir="/tmp", quality="best"):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": False,
-        "progress_hooks": [progress_hook],
+        "progress_hooks": [progress_hook]
     }
 
-def unique_filename(url, info):
-    title = info.get("title", "video").replace("/", "")
-    ext = info.get("ext", "mp4")
-    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-    return f"{title}{url_hash}.{ext}"
+def progress_hook(d):
+    if d['status'] == 'downloading':
+        print(f"[Downloading] {d['_percent_str']} of {d['_total_bytes_str']} at {d['_speed_str']}")
+    elif d['status'] == 'finished':
+        print("[Download complete]", d['filename'])
 
 def download_with_ytdlp(url, quality="best", download_dir="/tmp"):
-    with yt_dlp.YoutubeDL(build_ydl_opts(url, download_dir, quality)) as ydl:
+    ydl_opts = build_ydl_opts(url, download_dir, quality)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        raw_path = ydl.prepare_filename(info)
-        unique_path = os.path.join(download_dir, unique_filename(url, info))
-        os.rename(raw_path, unique_path)
-        return unique_path, info
+        filename = ydl.prepare_filename(info)
+        return filename, info
 
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
@@ -79,19 +77,8 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-async def download_once_per_url(url, func):
-    if url in active_downloads:
-        await active_downloads[url]
-        return None, None
-    task = asyncio.create_task(asyncio.to_thread(func, url))
-    active_downloads[url] = task
-    try:
-        return await task
-    finally:
-        active_downloads.pop(url, None)
-
 @Client.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
-async def auto_download_handler(bot: Client, message: Message):
+async def auto_download_handler(client: Client, message: Message):
     user = message.from_user
     uid = user.id
 
@@ -108,22 +95,24 @@ async def auto_download_handler(bot: Client, message: Message):
 
     for url in valid_urls:
         filepath = None
+
+        if url in ACTIVE_DOWNLOADS:
+            await message.reply(f"⏳ This link is already being processed: {url}")
+            continue
+
+        ACTIVE_DOWNLOADS.add(url)
+
         try:
             await asyncio.sleep(1)
             notice = await message.reply(f"Downloading from:\n{url}")
-
-            filepath, info = await download_once_per_url(url, lambda: download_with_ytdlp(url))
-
-            if not filepath:
-                await message.reply("This link is already being downloaded. Try again shortly.")
-                continue
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
 
             file_size = os.path.getsize(filepath)
             if USER_QUOTA[uid] + file_size > MAX_DAILY_QUOTA:
-                await message.reply("You have reached your daily quota limit.")
+                await message.reply("❌ You have reached your daily quota limit.")
                 os.remove(filepath)
                 continue
 
@@ -131,6 +120,7 @@ async def auto_download_handler(bot: Client, message: Message):
             caption = f"**Downloaded from:**\n{url}"
 
             uploading = await message.reply("Uploading...")
+
             thumb = generate_thumbnail(filepath) if ext.lower() in VIDEO_EXTENSIONS else None
 
             if ext.lower() in VIDEO_EXTENSIONS:
@@ -139,6 +129,7 @@ async def auto_download_handler(bot: Client, message: Message):
                 await message.reply_document(document=filepath, caption=caption)
 
             await uploading.delete()
+
             USER_QUOTA[uid] += file_size
 
             log_text = (
@@ -151,7 +142,7 @@ async def auto_download_handler(bot: Client, message: Message):
                 f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
             )
 
-            await bot.send_message(LOG_CHANNEL, log_text)
+            await client.send_message(LOG_CHANNEL, log_text)
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
@@ -161,7 +152,7 @@ async def auto_download_handler(bot: Client, message: Message):
             await message.reply(f"❌ Failed to download: {url}\n\n**Error:** {e}")
             for admin in ADMINS:
                 try:
-                    await bot.send_message(admin, f"Error on {url}:\n\n{traceback_text}")
+                    await client.send_message(admin, f"Error on {url}:\n\n{traceback_text}")
                 except:
                     pass
         finally:
@@ -173,3 +164,4 @@ async def auto_download_handler(bot: Client, message: Message):
                 await auto_cleanup()
             except:
                 pass
+            ACTIVE_DOWNLOADS.discard(url)
