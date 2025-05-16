@@ -22,3 +22,4 @@ pillow
 tqdm
 mega.py
 nest_asyncio
+tbdown
