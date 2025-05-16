@@ -13,6 +13,11 @@ from config import LOG_CHANNEL
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
 def download_with_ytdlp(url, download_dir="/tmp"):
+    if "drive.google.com" in url:
+        if "uc?id=" in url:
+            file_id = url.split("uc?id=")[-1].split("&")[0]
+            url = f"https://drive.google.com/file/d/{file_id}"
+
     ydl_opts = {
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
@@ -157,7 +162,7 @@ async def auto_download_handler(bot: Client, message: Message):
             continue
         except Exception as e:
             traceback.print_exc()
-            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+            await message.reply_text(f"\u274c Failed to download:\n{url}\n\n**{e}**")
         finally:
             try:
                 if filepath and os.path.exists(filepath):
