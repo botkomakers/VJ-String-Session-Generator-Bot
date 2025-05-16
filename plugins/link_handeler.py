@@ -11,7 +11,6 @@ from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 from mega import Mega
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
 import threading
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
@@ -55,8 +54,11 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        return output_thumb if os.path.exists(output_thumb) else None
-    except:
+        if os.path.exists(output_thumb):
+            return output_thumb
+        else:
+            return None
+    except Exception:
         return None
 
 async def auto_cleanup(path="/tmp", max_age=300):
@@ -68,7 +70,7 @@ async def auto_cleanup(path="/tmp", max_age=300):
             if age > max_age:
                 try:
                     os.remove(file_path)
-                except:
+                except Exception:
                     pass
 
 def is_google_drive_link(url):
@@ -159,6 +161,7 @@ def multithreaded_download(url, filename, num_threads=4):
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
+    filepath = None
     try:
         notice = await message.reply_text("🔍 লিংক বিশ্লেষণ করা হচ্ছে...")
     except FloodWait as e:
@@ -172,7 +175,6 @@ async def auto_download_handler(bot: Client, message: Message):
     await notice.edit(f"✅ {len(valid_urls)} টি লিংক পাওয়া গেছে। ডাউনলোড শুরু হচ্ছে...")
 
     for url in valid_urls:
-        filepath = None
         try:
             if is_google_drive_link(url):
                 url = fix_google_drive_url(url)
@@ -226,7 +228,7 @@ async def auto_download_handler(bot: Client, message: Message):
             )
             try:
                 await bot.send_message(LOG_CHANNEL, log_text)
-            except:
+            except Exception:
                 pass
 
         except FloodWait as e:
@@ -236,12 +238,12 @@ async def auto_download_handler(bot: Client, message: Message):
             traceback.print_exc()
             await message.reply_text(f"❌ ডাউনলোড ব্যর্থ:\n{url}\n\n**{e}**", reply_to_message_id=message.id)
 
-    finally:
-        try:
-            if filepath and os.path.exists(filepath):
-                os.remove(filepath)
-            if os.path.exists("/tmp/thumb.jpg"):
-                os.remove("/tmp/thumb.jpg")
-            await auto_cleanup()
-        except:
-            pass
+        finally:
+            try:
+                if filepath and os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
+                await auto_cleanup()
+            except Exception:
+                pass
