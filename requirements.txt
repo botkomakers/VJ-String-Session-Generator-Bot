@@ -21,3 +21,4 @@ aioredis==2.0.1
 pillow
 tqdm
 mega.py
+nest_asyncio
