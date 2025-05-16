@@ -31,7 +31,7 @@ async def edit_progress_message(message: Message, prefix: str, percent: float):
     except FloodWait as e:
         await asyncio.sleep(e.value)
         await message.edit(text)
-    except:
+    except Exception:
         pass
 
 
@@ -79,10 +79,13 @@ def download_with_progress(url, download_dir="/tmp", progress_callback=None):
                 downloaded_bytes = d.get('downloaded_bytes', 0)
                 if total_bytes:
                     percent = downloaded_bytes / total_bytes * 100
-                    asyncio.run_coroutine_threadsafe(
-                        progress_callback(percent),
-                        asyncio.get_event_loop()
-                    )
+                    # Use asyncio.run_coroutine_threadsafe to update from this thread
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            progress_callback(percent),
+                            loop
+                        )
 
         ydl_opts['progress_hooks'] = [hook]
 
@@ -115,98 +118,118 @@ async def auto_cleanup(path="/tmp", max_age=300):
                     pass
 
 
-@Client.on_message(filters.private & filters.text)
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
-    # Check if message is a reply, if yes extract URLs from replied text, else from current text
-    if message.reply_to_message and message.reply_to_message.text:
-        urls = message.reply_to_message.text.strip().split()
-    else:
-        urls = message.text.strip().split()
+    try:
+        # Ignore messages older than 5 minutes (to avoid re-processing old updates on restart)
+        if (datetime.datetime.utcnow() - message.date).total_seconds() > 300:
+            return
 
-    valid_urls = [url for url in urls if url.lower().startswith("http")]
-    if not valid_urls:
-        return await message.reply_text("❌ No valid links found.")
+        # Extract URLs from reply or current message
+        text_source = None
+        if message.reply_to_message and message.reply_to_message.text:
+            text_source = message.reply_to_message.text
+        elif message.text:
+            text_source = message.text
+        else:
+            await message.reply_text("❌ No valid links found.")
+            return
 
-    notice = await message.reply_text(f"Found {len(valid_urls)} link(s). Starting download...")
+        # Extract URLs (simple method: split by space)
+        urls = [word for word in text_source.strip().split() if word.lower().startswith("http")]
 
-    for url in valid_urls:
-        filepath = None
-        try:
-            # Fix Google Drive links
-            if is_google_drive_link(url):
-                url = fix_google_drive_url(url)
+        if not urls:
+            await message.reply_text("❌ No valid links found.")
+            return
 
-            await notice.delete()
-            progress_msg = await message.reply_text(f"Starting download from:\n{url}")
+        notice = await message.reply_text(f"Found {len(urls)} link(s). Starting download...")
 
-            # Download handlers
-            if is_mega_link(url):
-                filepath, info = await asyncio.to_thread(download_mega_file, url)
-                filepath = os.path.join("/tmp", filepath)
-            else:
-                async def progress_cb(percent):
-                    await edit_progress_message(progress_msg, "Downloading", percent)
-
-                filepath, info = await asyncio.to_thread(download_with_progress, url, "/tmp", progress_cb)
-
-            if not os.path.exists(filepath):
-                raise Exception("Download failed or file not found.")
-
-            ext = os.path.splitext(filepath)[1]
-            caption = f"Downloaded from:\n{url}"
-
-            await progress_msg.edit("Download complete. Starting upload...")
-
-            def upload_progress(current, total):
-                percent = current / total * 100
-                asyncio.run_coroutine_threadsafe(
-                    edit_progress_message(progress_msg, "Uploading", percent),
-                    asyncio.get_event_loop()
-                )
-
-            if ext.lower() in VIDEO_EXTENSIONS:
-                await bot.send_video(
-                    chat_id=message.chat.id,
-                    video=filepath,
-                    caption=caption,
-                    progress=upload_progress
-                )
-            else:
-                await bot.send_document(
-                    chat_id=message.chat.id,
-                    document=filepath,
-                    caption=caption,
-                    progress=upload_progress
-                )
-
-            await progress_msg.delete()
-
-            user = message.from_user
-            file_size = format_bytes(os.path.getsize(filepath))
-            log_text = (
-                f"**New Download Event**\n\n"
-                f"**User:** {user.mention} (`{user.id}`)\n"
-                f"**Link:** `{url}`\n"
-                f"**File Name:** `{os.path.basename(filepath)}`\n"
-                f"**Size:** `{file_size}`\n"
-                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
-                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
-            )
+        for url in urls:
+            filepath = None
             try:
-                await bot.send_message(LOG_CHANNEL, log_text)
-            except:
-                pass
+                # Fix Google Drive links
+                if is_google_drive_link(url):
+                    url = fix_google_drive_url(url)
 
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            continue
-        except Exception as e:
-            traceback.print_exc()
-            await message.reply_text(f"❌ Failed to download:\n{url}\n\nError: {e}")
-        finally:
-            try:
-                if filepath and os.path.exists(filepath):
-                    os.remove(filepath)
-                await auto_cleanup()
-            except:
-                pass
+                await notice.delete()
+                progress_msg = await message.reply_text(f"Starting download from:\n{url}")
+
+                if is_mega_link(url):
+                    filepath, info = await asyncio.to_thread(download_mega_file, url)
+                    filepath = os.path.join("/tmp", filepath)
+                else:
+                    async def progress_cb(percent):
+                        await edit_progress_message(progress_msg, "Downloading", percent)
+
+                    filepath, info = await asyncio.to_thread(download_with_progress, url, "/tmp", progress_cb)
+
+                if not os.path.exists(filepath):
+                    raise Exception("Download failed or file not found.")
+
+                ext = os.path.splitext(filepath)[1]
+                caption = f"Downloaded from:\n{url}"
+
+                await progress_msg.edit("Download complete. Starting upload...")
+
+                def upload_progress(current, total):
+                    percent = current / total * 100
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            edit_progress_message(progress_msg, "Uploading", percent),
+                            loop
+                        )
+
+                if ext.lower() in VIDEO_EXTENSIONS:
+                    await bot.send_video(
+                        chat_id=message.chat.id,
+                        video=filepath,
+                        caption=caption,
+                        progress=upload_progress
+                    )
+                else:
+                    await bot.send_document(
+                        chat_id=message.chat.id,
+                        document=filepath,
+                        caption=caption,
+                        progress=upload_progress
+                    )
+
+                await progress_msg.delete()
+
+                # Logging
+                user = message.from_user
+                file_size = format_bytes(os.path.getsize(filepath))
+                log_text = (
+                    f"**New Download Event**\n\n"
+                    f"**User:** {user.mention} (`{user.id}`)\n"
+                    f"**Link:** `{url}`\n"
+                    f"**File Name:** `{os.path.basename(filepath)}`\n"
+                    f"**Size:** `{file_size}`\n"
+                    f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                    f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+                )
+                try:
+                    await bot.send_message(LOG_CHANNEL, log_text)
+                except Exception as e:
+                    print(f"Failed to log message: {e}")
+
+            except FloodWait as e:
+                print(f"FloodWait: sleeping for {e.value} seconds")
+                await asyncio.sleep(e.value)
+                continue
+            except Exception as e:
+                print(f"Download/upload error: {e}")
+                traceback.print_exc()
+                await message.reply_text(f"❌ Failed to download:\n{url}\n\nError: {e}")
+            finally:
+                try:
+                    if filepath and os.path.exists(filepath):
+                        os.remove(filepath)
+                    await auto_cleanup()
+                except:
+                    pass
+
+    except Exception as e:
+        print(f"Unhandled exception in handler: {e}")
+        traceback.print_exc()
