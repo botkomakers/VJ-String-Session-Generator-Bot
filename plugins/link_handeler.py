@@ -54,9 +54,9 @@ def build_ydl_opts(url, download_dir="/tmp", quality="best"):
 
 def progress_hook(d):
     if d['status'] == 'downloading':
-        print(f"[Downloading] {d['_percent_str']} of {d['_total_bytes_str']} at {d['_speed_str']}")
+        print(f"[Downloading] {d.get('_percent_str', '')} of {d.get('_total_bytes_str', '')} at {d.get('_speed_str', '')}")
     elif d['status'] == 'finished':
-        print("[Download complete]", d['filename'])
+        print("[Download complete]", d.get('filename'))
 
 def download_with_ytdlp(url, quality="best", download_dir="/tmp"):
     ydl_opts = build_ydl_opts(url, download_dir, quality)
@@ -77,7 +77,7 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
+@Client.on_message(filters.text & ~filters.command(["start", "help"]))
 async def auto_download_handler(client: Client, message: Message):
     user = message.from_user
     uid = user.id
@@ -124,25 +124,14 @@ async def auto_download_handler(client: Client, message: Message):
             thumb = generate_thumbnail(filepath) if ext.lower() in VIDEO_EXTENSIONS else None
 
             if ext.lower() in VIDEO_EXTENSIONS:
-                await message.reply_video(video=filepath, caption=caption, thumb=thumb)
+                sent = await message.reply_video(video=filepath, caption=caption, thumb=thumb)
+                await client.send_video(chat_id=LOG_CHANNEL, video=filepath, caption=f"From: [{user.first_name}](tg://user?id={uid})\n{caption}", thumb=thumb)
             else:
-                await message.reply_document(document=filepath, caption=caption)
+                sent = await message.reply_document(document=filepath, caption=caption)
+                await client.send_document(chat_id=LOG_CHANNEL, document=filepath, caption=f"From: [{user.first_name}](tg://user?id={uid})\n{caption}")
 
             await uploading.delete()
-
             USER_QUOTA[uid] += file_size
-
-            log_text = (
-                f"**New Download Event**\n\n"
-                f"**User:** {user.mention} (`{uid}`)\n"
-                f"**Link:** `{url}`\n"
-                f"**File Name:** `{os.path.basename(filepath)}`\n"
-                f"**Size:** `{format_bytes(file_size)}`\n"
-                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
-                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
-            )
-
-            await client.send_message(LOG_CHANNEL, log_text)
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
