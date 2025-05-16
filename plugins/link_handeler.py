@@ -13,7 +13,7 @@ from config import LOG_CHANNEL, ADMINS
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 USER_QUOTA = {}
-MAX_DAILY_QUOTA = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_DAILY_QUOTA = 10 * 1024 * 1024 * 1024  # 10 GB
 PART_SIZE = int(1.7 * 1024 * 1024 * 1024)  # 1.7 GB
 ACTIVE_DOWNLOADS = set()
 
