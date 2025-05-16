@@ -5,14 +5,12 @@ import traceback
 import datetime
 import time
 import yt_dlp
-import gradio as gr
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-queue = asyncio.Queue()
 
 def format_bytes(size):
     power = 1024
@@ -28,7 +26,8 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
         import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
         return output_thumb if os.path.exists(output_thumb) else None
     except:
@@ -111,23 +110,9 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
         filename = ydl.prepare_filename(info)
         return filename, info
 
-async def auto_delete_message(bot, chat_id, message_id, delay):
-    await asyncio.sleep(delay)
-    try:
-        await bot.delete_messages(chat_id, message_id)
-    except:
-        pass
-
-async def process_queue(bot: Client):
-    while True:
-        message = await queue.get()
-        await handle_download(bot, message)
-        queue.task_done()
-
-async def handle_download(bot: Client, message: Message):
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def auto_download_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-    user = message.from_user
-
     try:
         notice = await message.reply_text("Analyzing link(s)...")
     except FloodWait as e:
@@ -138,18 +123,16 @@ async def handle_download(bot: Client, message: Message):
     if not valid_urls:
         return await notice.edit("No valid links detected.")
 
-    await notice.edit(f"Found {len(valid_urls)} link(s). Processing...")
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
-    for idx, url in enumerate(valid_urls):
+    for url in valid_urls:
         filepath = None
         try:
             if is_google_drive_link(url):
                 url = fix_google_drive_url(url)
 
-            processing = await message.reply_text(
-                f"Queue Position: {idx+1}/{len(valid_urls)}\nDownloading from:\n{url}",
-                reply_to_message_id=message.id
-            )
+            await notice.delete()
+            processing = await message.reply_text(f"Downloading from:\n{url}", reply_to_message_id=message.id)
 
             if is_mega_link(url):
                 filepath, info = await asyncio.to_thread(download_mega_file, url)
@@ -168,35 +151,28 @@ async def handle_download(bot: Client, message: Message):
                 f"**Source:** [Click to open]({url})"
             )
 
-            thumb = generate_thumbnail(filepath)
-
-            buttons = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Forward to Saved Messages", switch_inline_query=filepath)],
-                [InlineKeyboardButton("Open Source Link", url=url)],
-                [InlineKeyboardButton("Delete Now", callback_data=f"delete_{message.id}")]
-            ])
-
             upload_msg = await processing.edit("Uploading...")
+
+            thumb = generate_thumbnail(filepath)
 
             if ext.lower() in VIDEO_EXTENSIONS:
                 sent = await message.reply_video(
                     video=filepath,
                     caption=caption,
                     thumb=thumb if thumb else None,
-                    reply_markup=buttons,
                     reply_to_message_id=message.id
                 )
             else:
                 sent = await message.reply_document(
                     document=filepath,
                     caption=caption,
-                    reply_markup=buttons,
                     reply_to_message_id=message.id
                 )
 
             await upload_msg.delete()
             asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))
 
+            user = message.from_user
             file_size = format_bytes(os.path.getsize(filepath))
             log_text = (
                 f"**New Download Event**\n\n"
@@ -217,6 +193,9 @@ async def handle_download(bot: Client, message: Message):
                 )
                 await bot.send_message(ADMIN_ID, alert)
 
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
         except Exception as e:
             traceback.print_exc()
             await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
@@ -230,46 +209,9 @@ async def handle_download(bot: Client, message: Message):
             except:
                 pass
 
-@Client.on_message(filters.private & filters.text & ~filters.command(["start", "panel"]))
-async def queue_download(bot: Client, message: Message):
-    await message.reply_text("Added to queue...")
-    await queue.put(message)
-
-@Client.on_message(filters.command("panel") & filters.private)
-async def launch_panel(bot: Client, message: Message):
-    async def gradio_interface(link):
-        try:
-            filename, _ = await asyncio.to_thread(download_with_ytdlp, link)
-            return f"Downloaded: {filename}"
-        except Exception as e:
-            return str(e)
-
-    iface = gr.Interface(fn=gradio_interface, inputs="text", outputs="text", title="Downloader Panel")
-    iface.launch(share=True)
-    await message.reply_text("Web panel launched.")
-
-@Client.on_callback_query()
-async def delete_callback(bot, query):
-    if query.data.startswith("delete_"):
-        try:
-            await bot.delete_messages(query.message.chat.id, query.message.id)
-            await query.answer("Deleted")
-        except:
-            await query.answer("Failed to delete", show_alert=True)
-
-# Start queue processor
-from pyrogram import Client, idle
-import asyncio
-
-app = Client("downloader")
-
-@app.on_message(filters.command("start"))
-async def start_msg(bot, message):
-    await message.reply_text("Welcome to Downloader Bot! Send a link to begin.")
-
-async def main():
-    await app.start()
-    asyncio.create_task(process_queue(app))  # আপনার process_queue ফাংশনটি অ্যাসিনক্রোনাস ফাংশন হবে
-    await idle()  # Pyrogram এর idle যা বটকে চালু রাখে
-
-asyncio.run(main())
+async def auto_delete_message(bot, chat_id, message_id, delay):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_messages(chat_id, message_id)
+    except:
+        pass
