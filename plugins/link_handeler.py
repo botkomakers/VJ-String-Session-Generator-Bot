@@ -14,6 +14,7 @@ from config import LOG_CHANNEL, ADMINS
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 USER_QUOTA = {}
 MAX_DAILY_QUOTA = 2 * 1024 * 1024 * 1024  # 2 GB
+PART_SIZE = int(1.7 * 1024 * 1024 * 1024)  # 1.7 GB
 ACTIVE_DOWNLOADS = set()
 
 def format_bytes(size):
@@ -30,17 +31,18 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
         import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
 
-def get_unique_filename(info, download_dir="/tmp"):
-    title = info.get("title") or "video"
-    ext = info.get("ext") or "mp4"
-    uid = hashlib.md5(title.encode()).hexdigest()[:6]
-    return os.path.join(download_dir, f"{title}_{uid}.{ext}")
+def progress_hook(d):
+    if d['status'] == 'downloading':
+        print(f"[Downloading] {d.get('_percent_str', '')} of {d.get('_total_bytes_str', '')} at {d.get('_speed_str', '')}")
+    elif d['status'] == 'finished':
+        print("[Download complete]", d.get('filename'))
 
 def build_ydl_opts(url, download_dir="/tmp", quality="best"):
     return {
@@ -52,18 +54,27 @@ def build_ydl_opts(url, download_dir="/tmp", quality="best"):
         "progress_hooks": [progress_hook]
     }
 
-def progress_hook(d):
-    if d['status'] == 'downloading':
-        print(f"[Downloading] {d.get('_percent_str', '')} of {d.get('_total_bytes_str', '')} at {d.get('_speed_str', '')}")
-    elif d['status'] == 'finished':
-        print("[Download complete]", d.get('filename'))
-
 def download_with_ytdlp(url, quality="best", download_dir="/tmp"):
     ydl_opts = build_ydl_opts(url, download_dir, quality)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-        return filename, info
+    return filename, info
+
+def split_file(file_path, part_size=PART_SIZE):
+    parts = []
+    part_num = 1
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(part_size)
+            if not chunk:
+                break
+            part_path = f"{file_path}.part{part_num:02d}"
+            with open(part_path, 'wb') as part_file:
+                part_file.write(chunk)
+            parts.append(part_path)
+            part_num += 1
+    return parts
 
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
@@ -116,22 +127,33 @@ async def auto_download_handler(client: Client, message: Message):
                 os.remove(filepath)
                 continue
 
-            ext = os.path.splitext(filepath)[1]
             caption = f"**Downloaded from:**\n{url}"
+            ext = os.path.splitext(filepath)[1].lower()
+            thumb = generate_thumbnail(filepath) if ext in VIDEO_EXTENSIONS else None
 
-            uploading = await message.reply("Uploading...")
+            parts = split_file(filepath) if file_size > PART_SIZE else [filepath]
+            await notice.edit(f"Uploading {len(parts)} part(s)...")
 
-            thumb = generate_thumbnail(filepath) if ext.lower() in VIDEO_EXTENSIONS else None
+            for idx, part in enumerate(parts):
+                part_caption = f"{caption}\n**Part {idx+1}/{len(parts)}**"
+                if ext in VIDEO_EXTENSIONS:
+                    await message.reply_video(video=part, caption=part_caption, thumb=thumb)
+                    await client.send_video(
+                        chat_id=LOG_CHANNEL,
+                        video=part,
+                        caption=f"From: [{user.first_name}](tg://user?id={uid})\n{part_caption}",
+                        thumb=thumb
+                    )
+                else:
+                    await message.reply_document(document=part, caption=part_caption)
+                    await client.send_document(
+                        chat_id=LOG_CHANNEL,
+                        document=part,
+                        caption=f"From: [{user.first_name}](tg://user?id={uid})\n{part_caption}"
+                    )
 
-            if ext.lower() in VIDEO_EXTENSIONS:
-                sent = await message.reply_video(video=filepath, caption=caption, thumb=thumb)
-                await client.send_video(chat_id=LOG_CHANNEL, video=filepath, caption=f"From: [{user.first_name}](tg://user?id={uid})\n{caption}", thumb=thumb)
-            else:
-                sent = await message.reply_document(document=filepath, caption=caption)
-                await client.send_document(chat_id=LOG_CHANNEL, document=filepath, caption=f"From: [{user.first_name}](tg://user?id={uid})\n{caption}")
-
-            await uploading.delete()
             USER_QUOTA[uid] += file_size
+            await notice.delete()
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
@@ -148,6 +170,9 @@ async def auto_download_handler(client: Client, message: Message):
             try:
                 if filepath and os.path.exists(filepath):
                     os.remove(filepath)
+                for f in os.listdir("/tmp"):
+                    if filepath and f.startswith(os.path.basename(filepath)) and ".part" in f:
+                        os.remove(os.path.join("/tmp", f))
                 if os.path.exists("/tmp/thumb.jpg"):
                     os.remove("/tmp/thumb.jpg")
                 await auto_cleanup()
