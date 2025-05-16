@@ -145,13 +145,14 @@ async def auto_download_handler(bot: Client, message: Message):
 
             ext = os.path.splitext(filepath)[1]
             caption = (
-                "**⚠️ IMPORTANT NOTICE ⚠️**\n\n"
-                "This video will be **automatically deleted in 5 minutes** due to copyright policies.\n"
-                "Please **forward** it to your **Saved Messages** or any private chat to keep a copy.\n\n"
-                f"**Source:** [Click to open]({url})"
+                f"🔒 **IMPORTANT NOTICE** 🔒\n\n"
+                f"This file will be deleted automatically in 5 minutes for copyright safety.\n"
+                f"**Please forward it to your Saved Messages now.**\n\n"
+                f"**Downloaded from:**\n{url}"
             )
 
-            upload_msg = await processing.edit("Uploading...")
+            await processing.delete()
+            uploading = await message.reply_text("Uploading...", reply_to_message_id=message.id)
 
             thumb = generate_thumbnail(filepath)
 
@@ -169,7 +170,7 @@ async def auto_download_handler(bot: Client, message: Message):
                     reply_to_message_id=message.id
                 )
 
-            await upload_msg.delete()
+            await uploading.delete()
             asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))
 
             user = message.from_user
