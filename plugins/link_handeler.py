@@ -8,13 +8,40 @@ import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-from config import LOG_CHANNEL, ADMIN_ID
+from concurrent.futures import ThreadPoolExecutor
+from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-PORN_KEYWORDS = ["porn", "xvideos", "redtube", "sex", "hentai", "xnxx", "xxx", "18+", "hot", "erotic", "nude"]
+executor = ThreadPoolExecutor(max_workers=4)
 
-# Helper: Format bytes to readable format
+def download_with_ytdlp(url, download_dir="/tmp"):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "retries": 5,
+        "concurrent_fragment_downloads": 5,
+        "fragment_retries": 3,
+        "continuedl": True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
+
+def download_mega_file(url, download_dir="/tmp"):
+    from mega import Mega
+    mega = Mega()
+    m = mega.login()  # Anonymous login
+    file = m.download_url(url, dest_path=download_dir)
+    return file.name, {
+        "title": file.name,
+        "ext": os.path.splitext(file.name)[1].lstrip(".")
+    }
+
 def format_bytes(size):
     power = 1024
     n = 0
@@ -24,32 +51,17 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
-# Helper: Generate thumbnail
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
-
-# Helper: Clean old files
-def make_progress_bar(current, total, length=20):
-    percent = current / total
-    filled_length = int(length * percent)
-    bar = '■' * filled_length + '▩' + '□' * (length - filled_length - 1)
-    return f"{int(percent * 100)}%\n{bar}"
-
-async def progress_callback(current, total, message: Message, action="Downloading"):
-    try:
-        progress_text = make_progress_bar(current, total)
-        text = f"{action}: {progress_text}"
-        await message.edit_text(text)
-    except:
-        pass
 
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
@@ -63,7 +75,6 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-# Google Drive
 def is_google_drive_link(url):
     return "drive.google.com" in url
 
@@ -75,48 +86,25 @@ def fix_google_drive_url(url):
         return f"https://drive.google.com/uc?id={file_id}&export=download"
     return url
 
-# Mega.nz
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
-def download_mega_file(url, download_dir="/tmp"):
-    from mega import Mega
-    mega = Mega()
-    m = mega.login()
-    file = m.download_url(url, dest_path=download_dir)
-    return file.name, {
-        "title": file.name,
-        "ext": os.path.splitext(file.name)[1].lstrip(".")
-    }
+def progress_bar(current, total, width=25):
+    percent = current * 100 / total
+    filled = int(width * current // total)
+    bar = '█' * filled + '▁' * (width - filled)
+    return f"{bar} {percent:.1f}%"
 
-# yt-dlp
-def download_with_ytdlp(url, download_dir="/tmp", message=None):
-    def hook(d):
-        if d['status'] == 'downloading' and message:
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            downloaded = d.get("downloaded_bytes", 0)
-            if total:
-                asyncio.run_coroutine_threadsafe(
-                    progress_callback(downloaded, total, message, "Downloading"),
-                    asyncio.get_event_loop()
-                )
-
-    ydl_opts = {
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "progress_hooks": [hook]
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename, info
-
-def is_porn_link(url):
-    url_lower = url.lower()
-    return any(keyword in url_lower for keyword in PORN_KEYWORDS)
+async def progress_callback(current, total, message: Message, label: str):
+    try:
+        bar = progress_bar(current, total)
+        await message.edit(
+            f"**{label}**\n\n"
+            f"`{format_bytes(current)} of {format_bytes(total)}`\n"
+            f"`{bar}`"
+        )
+    except:
+        pass
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
@@ -136,19 +124,6 @@ async def auto_download_handler(bot: Client, message: Message):
     for url in valid_urls:
         filepath = None
         try:
-            if is_porn_link(url):
-                user = message.from_user
-                warning_text = (
-                    f"**Pornographic Link Detected!**\n\n"
-                    f"**User:** {user.mention} (`{user.id}`)\n"
-                    f"**Link:** `{url}`\n"
-                    f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
-                )
-                await bot.send_message(ADMIN_ID, warning_text)
-                await bot.send_message(LOG_CHANNEL, warning_text)
-                await notice.edit("❌ Pornographic content is not allowed!")
-                continue
-
             if is_google_drive_link(url):
                 url = fix_google_drive_url(url)
 
@@ -156,10 +131,10 @@ async def auto_download_handler(bot: Client, message: Message):
             processing = await message.reply_text(f"Downloading from:\n{url}")
 
             if is_mega_link(url):
-                filepath, info = await asyncio.to_thread(download_mega_file, url)
+                filepath, info = await asyncio.get_event_loop().run_in_executor(executor, download_mega_file, url)
                 filepath = os.path.join("/tmp", filepath)
             else:
-                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)
+                filepath, info = await asyncio.get_event_loop().run_in_executor(executor, download_with_ytdlp, url)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
@@ -167,7 +142,8 @@ async def auto_download_handler(bot: Client, message: Message):
             ext = os.path.splitext(filepath)[1]
             caption = f"**Downloaded from:**\n{url}"
 
-            await processing.edit("Uploading...")
+            await processing.delete()
+            uploading = await message.reply_text("Uploading...")
 
             if ext.lower() in VIDEO_EXTENSIONS:
                 thumb = generate_thumbnail(filepath)
@@ -176,17 +152,17 @@ async def auto_download_handler(bot: Client, message: Message):
                     caption=caption,
                     thumb=thumb if thumb else None,
                     progress=progress_callback,
-                    progress_args=(message, "Sending")
+                    progress_args=(uploading, "Uploading Video")
                 )
             else:
                 await message.reply_document(
                     document=filepath,
                     caption=caption,
                     progress=progress_callback,
-                    progress_args=(message, "Sending")
+                    progress_args=(uploading, "Uploading File")
                 )
 
-            await processing.delete()
+            await uploading.delete()
 
             user = message.from_user
             file_size = format_bytes(os.path.getsize(filepath))
