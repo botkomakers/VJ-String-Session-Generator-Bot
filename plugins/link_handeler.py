@@ -4,31 +4,25 @@ import time
 import datetime
 import subprocess
 import traceback
-import shutil
-from pyrogram import Client, filters
+from pyrogram import filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 import yt_dlp
 
-from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL
+from config import LOG_CHANNEL
 
-# Constants and Limits
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024  # 2GB Telegram max file size
-SAFETY_MARGIN = 50 * 1024 * 1024  # 50MB safety margin
-MAX_UPLOAD_SIZE = TELEGRAM_MAX_SIZE - SAFETY_MARGIN  # ~1.95GB
+TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024
+SAFETY_MARGIN = 50 * 1024 * 1024
+MAX_UPLOAD_SIZE = TELEGRAM_MAX_SIZE - SAFETY_MARGIN
 
 DOWNLOAD_BASE_DIR = "/tmp/downloads"
 os.makedirs(DOWNLOAD_BASE_DIR, exist_ok=True)
 
-# Semaphore to limit concurrent downloads/uploads
 MAX_CONCURRENT_TASKS = 3
 sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
-bot = Client("yt_dl_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-
-def format_bytes(size):
+def format_bytes(size: int) -> str:
     power = 1024
     n = 0
     units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -37,42 +31,38 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
-
-def generate_thumbnail(file_path, output_thumb=None):
+def generate_thumbnail(file_path: str, output_thumb: str = None) -> str | None:
     if not output_thumb:
         output_thumb = os.path.join(os.path.dirname(file_path), "thumb.jpg")
     try:
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
+            check=True
         )
         if os.path.exists(output_thumb):
             return output_thumb
-        return None
     except Exception as e:
         print(f"Thumbnail generation failed: {e}")
-        return None
+    return None
 
-
-async def auto_cleanup(path=DOWNLOAD_BASE_DIR, max_age=900):
+async def auto_cleanup(path: str = DOWNLOAD_BASE_DIR, max_age: int = 900):
     now = time.time()
-    for filename in os.listdir(path):
-        file_path = os.path.join(path, filename)
-        if os.path.isfile(file_path):
-            age = now - os.path.getmtime(file_path)
-            if age > max_age:
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
+    try:
+        for filename in os.listdir(path):
+            file_path = os.path.join(path, filename)
+            if os.path.isfile(file_path):
+                age = now - os.path.getmtime(file_path)
+                if age > max_age:
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"Cleanup error: {e}")
 
-
-async def split_video(filepath):
-    """
-    Split video into chunks of max ~1.9GB for Telegram upload.
-    Returns list of filepaths.
-    """
+async def split_video(filepath: str) -> list[str]:
     chunk_size = MAX_UPLOAD_SIZE
     file_size = os.path.getsize(filepath)
     if file_size <= chunk_size:
@@ -81,52 +71,57 @@ async def split_video(filepath):
     base_name, ext = os.path.splitext(filepath)
     output_files = []
 
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        total_duration = float(result.stdout.strip())
+    except Exception:
+        total_duration = None
+
     total_parts = (file_size // chunk_size) + 1
     print(f"Splitting file into {total_parts} parts...")
 
+    if not total_duration:
+        return [filepath]
+
+    duration_per_part = total_duration / total_parts
+
     for i in range(total_parts):
         part_path = f"{base_name}_part{i + 1}{ext}"
-        start = i * chunk_size
-        duration = None  # We'll calculate duration dynamically using ffprobe
+        start_time = duration_per_part * i
 
-        # Using ffmpeg to split based on size is tricky; better to split by duration
-        # First, calculate total duration of video
+        cmd = [
+            "ffmpeg",
+            "-i", filepath,
+            "-ss", str(start_time),
+            "-t", str(duration_per_part),
+            "-c", "copy",
+            "-y",
+            part_path
+        ]
+
         try:
-            result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            total_duration = float(result.stdout.strip())
-            # Calculate duration per chunk
-            duration = (total_duration / total_parts)
-        except Exception:
-            # fallback if ffprobe fails
-            duration = None
-
-        # Build ffmpeg command to split
-        if duration:
-            cmd = [
-                "ffmpeg", "-i", filepath,
-                "-ss", str(duration * i),
-                "-t", str(duration),
-                "-c", "copy",
-                part_path,
-                "-y"
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             if os.path.exists(part_path):
                 output_files.append(part_path)
-        else:
-            # If duration unknown, just return original file (won't split)
+        except Exception as e:
+            print(f"Failed to create part {i + 1}: {e}")
+            for f in output_files:
+                try:
+                    os.remove(f)
+                except:
+                    pass
             return [filepath]
 
     return output_files
 
-
-async def download_with_ytdlp(url, download_dir):
+async def download_with_ytdlp(url: str, download_dir: str) -> tuple[str, dict]:
     ydl_opts = {
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
         "format": "bestvideo+bestaudio/best",
@@ -143,19 +138,17 @@ async def download_with_ytdlp(url, download_dir):
         filename = ydl.prepare_filename(info)
         return filename, info
 
-
 async def send_progress_message(message: Message, text: str):
     try:
         await message.edit(text)
     except FloodWait as e:
         await asyncio.sleep(e.value)
         await message.edit(text)
-    except:
+    except Exception:
         pass
 
-
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
-async def handle_message(client: Client, message: Message):
+async def handle_message(client, message: Message):
     urls = message.text.strip().split()
     valid_urls = [url for url in urls if url.lower().startswith("http")]
 
@@ -173,7 +166,6 @@ async def handle_message(client: Client, message: Message):
             try:
                 await send_progress_message(notice, f"Downloading:\n{url}")
 
-                # Download file (in thread to avoid blocking)
                 filepath, info = await asyncio.to_thread(download_with_ytdlp, url, user_dir)
 
                 if not os.path.exists(filepath):
@@ -181,13 +173,14 @@ async def handle_message(client: Client, message: Message):
 
                 file_size = os.path.getsize(filepath)
 
-                # Split if file too big
                 if file_size > MAX_UPLOAD_SIZE:
                     await send_progress_message(notice, "File too large, splitting now...")
                     parts = await split_video(filepath)
-                    os.remove(filepath)  # remove original large file
+                    try:
+                        os.remove(filepath)
+                    except Exception:
+                        pass
 
-                    # Upload all parts one by one
                     for part_file in parts:
                         part_size = os.path.getsize(part_file)
                         if part_size > MAX_UPLOAD_SIZE:
@@ -210,8 +203,10 @@ async def handle_message(client: Client, message: Message):
                                 document=part_file,
                                 caption=caption,
                             )
-
-                        os.remove(part_file)
+                        try:
+                            os.remove(part_file)
+                        except Exception:
+                            pass
                 else:
                     ext = os.path.splitext(filepath)[1].lower()
                     caption = f"**Downloaded from:**\n{url}"
@@ -232,7 +227,6 @@ async def handle_message(client: Client, message: Message):
                             caption=caption,
                         )
 
-                # Logging
                 user = message.from_user
                 log_msg = (
                     f"📥 **New Download**\n\n"
@@ -261,14 +255,13 @@ async def handle_message(client: Client, message: Message):
                     if os.path.exists(thumb_path):
                         os.remove(thumb_path)
                     await auto_cleanup(user_dir)
-                except:
+                except Exception:
                     pass
 
     await notice.delete()
 
-
 @bot.on_message(filters.command("start"))
-async def start_command(client: Client, message: Message):
+async def start_command(client, message: Message):
     await message.reply_text(
         "Welcome! Send me any video or playlist URL and I'll download it for you.\n"
         "Commands:\n"
@@ -276,9 +269,8 @@ async def start_command(client: Client, message: Message):
         "/help - Get help info\n"
     )
 
-
 @bot.on_message(filters.command("help"))
-async def help_command(client: Client, message: Message):
+async def help_command(client, message: Message):
     await message.reply_text(
         "Usage:\n"
         "Just send me video URLs.\n"
@@ -287,19 +279,3 @@ async def help_command(client: Client, message: Message):
         "Supports many sites via yt-dlp.\n"
         "For issues contact admin."
     )
-
-
-if __name__ == "__main__":
-    try:
-        import shutil
-
-        for binary in ["ffmpeg", "yt-dlp"]:
-            if not shutil.which(binary):
-                print(f"Required binary '{binary}' not found. Please install it before running the bot.")
-                exit(1)
-    except Exception as e:
-        print(e)
-        exit(1)
-
-    print("Bot is starting...")
-    bot.run()
