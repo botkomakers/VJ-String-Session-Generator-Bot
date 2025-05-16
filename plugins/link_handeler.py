@@ -258,12 +258,18 @@ async def delete_callback(bot, query):
             await query.answer("Failed to delete", show_alert=True)
 
 # Start queue processor
+from pyrogram import Client, idle
+import asyncio
+
 app = Client("downloader")
 
 @app.on_message(filters.command("start"))
 async def start_msg(bot, message):
     await message.reply_text("Welcome to Downloader Bot! Send a link to begin.")
 
-app.start()
-asyncio.create_task(process_queue(app))
-app.idle()
+async def main():
+    await app.start()
+    asyncio.create_task(process_queue(app))  # আপনার process_queue ফাংশনটি অ্যাসিনক্রোনাস ফাংশন হবে
+    await idle()  # Pyrogram এর idle যা বটকে চালু রাখে
+
+asyncio.run(main())
