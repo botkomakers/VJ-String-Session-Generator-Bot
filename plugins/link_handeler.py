@@ -1,28 +1,41 @@
 import os
+import aiohttp
 import asyncio
-import time
-import datetime
-import subprocess
 import traceback
-from pyrogram import filters
+import datetime
+import time
+import yt_dlp
+from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-import yt_dlp
-
 from config import LOG_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024
-SAFETY_MARGIN = 50 * 1024 * 1024
-MAX_UPLOAD_SIZE = TELEGRAM_MAX_SIZE - SAFETY_MARGIN
 
-DOWNLOAD_BASE_DIR = "/tmp/downloads"
-os.makedirs(DOWNLOAD_BASE_DIR, exist_ok=True)
+def download_with_ytdlp(url, download_dir="/tmp"):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
 
-MAX_CONCURRENT_TASKS = 3
-sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+def download_mega_file(url, download_dir="/tmp"):
+    from mega import Mega
+    mega = Mega()
+    m = mega.login()  # Anonymous login
+    file = m.download_url(url, dest_path=download_dir)
+    return file.name, {
+        "title": file.name,
+        "ext": os.path.splitext(file.name)[1].lstrip(".")
+    }
 
-def format_bytes(size: int) -> str:
+def format_bytes(size):
     power = 1024
     n = 0
     units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -31,251 +44,126 @@ def format_bytes(size: int) -> str:
         n += 1
     return f"{size:.2f} {units[n]}"
 
-def generate_thumbnail(file_path: str, output_thumb: str = None) -> str | None:
-    if not output_thumb:
-        output_thumb = os.path.join(os.path.dirname(file_path), "thumb.jpg")
+def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
+        import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
+            stderr=subprocess.DEVNULL
         )
-        if os.path.exists(output_thumb):
-            return output_thumb
-    except Exception as e:
-        print(f"Thumbnail generation failed: {e}")
-    return None
+        return output_thumb if os.path.exists(output_thumb) else None
+    except:
+        return None
 
-async def auto_cleanup(path: str = DOWNLOAD_BASE_DIR, max_age: int = 900):
+async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
-    try:
-        for filename in os.listdir(path):
-            file_path = os.path.join(path, filename)
-            if os.path.isfile(file_path):
-                age = now - os.path.getmtime(file_path)
-                if age > max_age:
-                    try:
-                        os.remove(file_path)
-                    except Exception:
-                        pass
-    except Exception as e:
-        print(f"Cleanup error: {e}")
-
-async def split_video(filepath: str) -> list[str]:
-    chunk_size = MAX_UPLOAD_SIZE
-    file_size = os.path.getsize(filepath)
-    if file_size <= chunk_size:
-        return [filepath]
-
-    base_name, ext = os.path.splitext(filepath)
-    output_files = []
-
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True
-        )
-        total_duration = float(result.stdout.strip())
-    except Exception:
-        total_duration = None
-
-    total_parts = (file_size // chunk_size) + 1
-    print(f"Splitting file into {total_parts} parts...")
-
-    if not total_duration:
-        return [filepath]
-
-    duration_per_part = total_duration / total_parts
-
-    for i in range(total_parts):
-        part_path = f"{base_name}_part{i + 1}{ext}"
-        start_time = duration_per_part * i
-
-        cmd = [
-            "ffmpeg",
-            "-i", filepath,
-            "-ss", str(start_time),
-            "-t", str(duration_per_part),
-            "-c", "copy",
-            "-y",
-            part_path
-        ]
-
-        try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            if os.path.exists(part_path):
-                output_files.append(part_path)
-        except Exception as e:
-            print(f"Failed to create part {i + 1}: {e}")
-            for f in output_files:
+    for filename in os.listdir(path):
+        file_path = os.path.join(path, filename)
+        if os.path.isfile(file_path):
+            age = now - os.path.getmtime(file_path)
+            if age > max_age:
                 try:
-                    os.remove(f)
+                    os.remove(file_path)
                 except:
                     pass
-            return [filepath]
 
-    return output_files
+def is_google_drive_link(url):
+    return "drive.google.com" in url
 
-async def download_with_ytdlp(url: str, download_dir: str) -> tuple[str, dict]:
-    ydl_opts = {
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-        "format": "bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36"
-        }
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename, info
+def fix_google_drive_url(url):
+    if "uc?id=" in url or "export=download" in url:
+        return url
+    if "/file/d/" in url:
+        file_id = url.split("/file/d/")[1].split("/")[0]
+        return f"https://drive.google.com/uc?id={file_id}&export=download"
+    return url
 
-async def send_progress_message(message: Message, text: str):
+def is_mega_link(url):
+    return "mega.nz" in url or "mega.co.nz" in url
+
+@Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
+async def auto_download_handler(bot: Client, message: Message):
+    urls = message.text.strip().split()
     try:
-        await message.edit(text)
+        notice = await message.reply_text("Analyzing link(s)...")
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        await message.edit(text)
-    except Exception:
-        pass
+        notice = await message.reply_text("Analyzing link(s)...")
 
-@bot.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
-async def handle_message(client, message: Message):
-    urls = message.text.strip().split()
     valid_urls = [url for url in urls if url.lower().startswith("http")]
-
     if not valid_urls:
-        return await message.reply_text("No valid URLs found in your message!")
+        return await notice.edit("No valid links detected.")
 
-    user_dir = os.path.join(DOWNLOAD_BASE_DIR, str(message.from_user.id))
-    os.makedirs(user_dir, exist_ok=True)
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
-    notice = await message.reply_text(f"Detected {len(valid_urls)} URL(s). Starting downloads...")
+    for url in valid_urls:
+        filepath = None
+        try:
+            if is_google_drive_link(url):
+                url = fix_google_drive_url(url)
 
-    async with sem:
-        for url in valid_urls:
-            filepath = None
-            try:
-                await send_progress_message(notice, f"Downloading:\n{url}")
+            await notice.delete()
+            processing = await message.reply_text(f"Downloading from:\n{url}")
 
-                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, user_dir)
+            if is_mega_link(url):
+                filepath, info = await asyncio.to_thread(download_mega_file, url)
+                filepath = os.path.join("/tmp", filepath)
+            else:
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
-                if not os.path.exists(filepath):
-                    raise Exception("Downloaded file not found!")
+            if not os.path.exists(filepath):
+                raise Exception("Download failed or file not found.")
 
-                file_size = os.path.getsize(filepath)
+            ext = os.path.splitext(filepath)[1]
+            caption = f"**Downloaded from:**\n{url}"
 
-                if file_size > MAX_UPLOAD_SIZE:
-                    await send_progress_message(notice, "File too large, splitting now...")
-                    parts = await split_video(filepath)
-                    try:
-                        os.remove(filepath)
-                    except Exception:
-                        pass
+            await processing.delete()
+            uploading = await message.reply_text("Uploading...")
 
-                    for part_file in parts:
-                        part_size = os.path.getsize(part_file)
-                        if part_size > MAX_UPLOAD_SIZE:
-                            await send_progress_message(notice, f"Part file too large: {os.path.basename(part_file)}")
-                            continue
-
-                        ext = os.path.splitext(part_file)[1].lower()
-                        caption = f"**Downloaded from:**\n{url}\n(part file)"
-
-                        if ext in VIDEO_EXTENSIONS:
-                            thumb = generate_thumbnail(part_file)
-                            await message.reply_video(
-                                video=part_file,
-                                caption=caption,
-                                thumb=thumb,
-                                supports_streaming=True,
-                            )
-                        else:
-                            await message.reply_document(
-                                document=part_file,
-                                caption=caption,
-                            )
-                        try:
-                            os.remove(part_file)
-                        except Exception:
-                            pass
-                else:
-                    ext = os.path.splitext(filepath)[1].lower()
-                    caption = f"**Downloaded from:**\n{url}"
-
-                    await send_progress_message(notice, "Uploading to Telegram...")
-
-                    if ext in VIDEO_EXTENSIONS:
-                        thumb = generate_thumbnail(filepath)
-                        await message.reply_video(
-                            video=filepath,
-                            caption=caption,
-                            thumb=thumb,
-                            supports_streaming=True,
-                        )
-                    else:
-                        await message.reply_document(
-                            document=filepath,
-                            caption=caption,
-                        )
-
-                user = message.from_user
-                log_msg = (
-                    f"📥 **New Download**\n\n"
-                    f"👤 User: {user.mention} (`{user.id}`)\n"
-                    f"🔗 Link: `{url}`\n"
-                    f"📁 File: `{os.path.basename(filepath)}`\n"
-                    f"💾 Size: {format_bytes(file_size)}\n"
-                    f"📅 Time: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+            if ext.lower() in VIDEO_EXTENSIONS:
+                thumb = generate_thumbnail(filepath)
+                await message.reply_video(
+                    video=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None
                 )
-                try:
-                    await client.send_message(LOG_CHANNEL, log_msg)
-                except Exception:
-                    pass
+            else:
+                await message.reply_document(
+                    document=filepath,
+                    caption=caption
+                )
 
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                continue
-            except Exception as e:
-                traceback.print_exc()
-                await message.reply_text(f"❌ Failed to download:\n{url}\n\n**Error:** {e}")
-            finally:
-                try:
-                    if filepath and os.path.exists(filepath):
-                        os.remove(filepath)
-                    thumb_path = os.path.join(user_dir, "thumb.jpg")
-                    if os.path.exists(thumb_path):
-                        os.remove(thumb_path)
-                    await auto_cleanup(user_dir)
-                except Exception:
-                    pass
+            await uploading.delete()
 
-    await notice.delete()
+            user = message.from_user
+            file_size = format_bytes(os.path.getsize(filepath))
+            log_text = (
+                f"**New Download Event**\n\n"
+                f"**User:** {user.mention} (`{user.id}`)\n"
+                f"**Link:** `{url}`\n"
+                f"**File Name:** `{os.path.basename(filepath)}`\n"
+                f"**Size:** `{file_size}`\n"
+                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+            )
+            try:
+                await bot.send_message(LOG_CHANNEL, log_text)
+            except:
+                pass
 
-@bot.on_message(filters.command("start"))
-async def start_command(client, message: Message):
-    await message.reply_text(
-        "Welcome! Send me any video or playlist URL and I'll download it for you.\n"
-        "Commands:\n"
-        "/start - Show this message\n"
-        "/help - Get help info\n"
-    )
-
-@bot.on_message(filters.command("help"))
-async def help_command(client, message: Message):
-    await message.reply_text(
-        "Usage:\n"
-        "Just send me video URLs.\n"
-        "I will download and send back the video/document.\n"
-        "Max file size ~1.95GB (due to Telegram limits).\n"
-        "Supports many sites via yt-dlp.\n"
-        "For issues contact admin."
-    )
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
+        except Exception as e:
+            traceback.print_exc()
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+        finally:
+            try:
+                if filepath and os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
+                await auto_cleanup()
+            except:
+                pass
