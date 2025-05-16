@@ -8,40 +8,11 @@ import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-from concurrent.futures import ThreadPoolExecutor
-from config import LOG_CHANNEL
+from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-executor = ThreadPoolExecutor(max_workers=4)
-
-def download_with_ytdlp(url, download_dir="/tmp"):
-    ydl_opts = {
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-        "format": "best[ext=mp4]/best",
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "retries": 5,
-        "concurrent_fragment_downloads": 5,
-        "fragment_retries": 3,
-        "continuedl": True
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename, info
-
-def download_mega_file(url, download_dir="/tmp"):
-    from mega import Mega
-    mega = Mega()
-    m = mega.login()  # Anonymous login
-    file = m.download_url(url, dest_path=download_dir)
-    return file.name, {
-        "title": file.name,
-        "ext": os.path.splitext(file.name)[1].lstrip(".")
-    }
-
+# Format bytes
 def format_bytes(size):
     power = 1024
     n = 0
@@ -51,18 +22,33 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
+# Thumbnail Generator
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         import subprocess
-        subprocess.run(
-            ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        subprocess.run([
+            "ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
 
+# Progress Bar
+def make_progress_bar(current, total, length=20):
+    percent = current / total
+    filled_length = int(length * percent)
+    bar = '■' * filled_length + '▩' + '□' * (length - filled_length - 1)
+    return f"{int(percent * 100)}%\n{bar}"
+
+async def progress_callback(current, total, message: Message, action="Downloading"):
+    try:
+        progress_text = make_progress_bar(current, total)
+        text = f"{action}: {progress_text}"
+        await message.edit_text(text)
+    except:
+        pass
+
+# Auto Cleanup
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
     for filename in os.listdir(path):
@@ -75,6 +61,7 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
+# Google Drive
 def is_google_drive_link(url):
     return "drive.google.com" in url
 
@@ -86,26 +73,46 @@ def fix_google_drive_url(url):
         return f"https://drive.google.com/uc?id={file_id}&export=download"
     return url
 
+# MEGA
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
-def progress_bar(current, total, width=25):
-    percent = current * 100 / total
-    filled = int(width * current // total)
-    bar = '█' * filled + '▁' * (width - filled)
-    return f"{bar} {percent:.1f}%"
+def download_mega_file(url, download_dir="/tmp"):
+    from mega import Mega
+    mega = Mega()
+    m = mega.login()
+    file = m.download_url(url, dest_path=download_dir)
+    return file.name, {
+        "title": file.name,
+        "ext": os.path.splitext(file.name)[1].lstrip(".")
+    }
 
-async def progress_callback(current, total, message: Message, label: str):
-    try:
-        bar = progress_bar(current, total)
-        await message.edit(
-            f"**{label}**\n\n"
-            f"`{format_bytes(current)} of {format_bytes(total)}`\n"
-            f"`{bar}`"
-        )
-    except:
-        pass
+# yt-dlp download
+def download_with_ytdlp(url, download_dir="/tmp", message=None):
+    def hook(d):
+        if d['status'] == 'downloading' and message:
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            if total:
+                asyncio.run_coroutine_threadsafe(
+                    progress_callback(downloaded, total, message, "Downloading"),
+                    asyncio.get_event_loop()
+                )
 
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "progress_hooks": [hook]
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename, info
+
+# Handler
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
@@ -131,41 +138,42 @@ async def auto_download_handler(bot: Client, message: Message):
             processing = await message.reply_text(f"Downloading from:\n{url}")
 
             if is_mega_link(url):
-                filepath, info = await asyncio.get_event_loop().run_in_executor(executor, download_mega_file, url)
+                filepath, info = await asyncio.to_thread(download_mega_file, url)
                 filepath = os.path.join("/tmp", filepath)
             else:
-                filepath, info = await asyncio.get_event_loop().run_in_executor(executor, download_with_ytdlp, url)
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
 
             ext = os.path.splitext(filepath)[1]
-            caption = f"**Downloaded from:**\n{url}"
+            file_size = format_bytes(os.path.getsize(filepath))
+            thumb = generate_thumbnail(filepath)
 
-            await processing.delete()
-            uploading = await message.reply_text("Uploading...")
+            caption = (
+                f"**Downloaded from:**\n{url}\n\n"
+                f"❗️❗️❗️IMPORTANT❗️️❗️❗️\n"
+                f"ᴛʜɪs ᴍᴇssᴀɢᴇ ᴡɪʟʟ ʙᴇ ᴅᴇʟᴇᴛᴇᴅ ɪɴ 5 ᴍɪɴs 🫥 "
+                f"(ᴅᴜᴇ ᴛᴏ ᴄᴏᴘʏʀɪɢʜᴛ ɪssᴜᴇs).\n"
+                f"ᴘʟᴇᴀsᴇ ғᴏʀᴡᴀʀᴅ ᴛʜɪs ᴛᴏ ʏᴏᴜʀ sᴀᴠᴇᴅ ᴍᴇssᴀɢᴇs ᴏʀ ᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ."
+            )
 
             if ext.lower() in VIDEO_EXTENSIONS:
-                thumb = generate_thumbnail(filepath)
-                await message.reply_video(
+                sent = await message.reply_video(
                     video=filepath,
                     caption=caption,
-                    thumb=thumb if thumb else None,
-                    progress=progress_callback,
-                    progress_args=(uploading, "Uploading Video")
+                    thumb=thumb if thumb else None
                 )
             else:
-                await message.reply_document(
+                sent = await message.reply_document(
                     document=filepath,
-                    caption=caption,
-                    progress=progress_callback,
-                    progress_args=(uploading, "Uploading File")
+                    caption=caption
                 )
 
-            await uploading.delete()
+            await asyncio.sleep(300)
+            await sent.delete()
 
             user = message.from_user
-            file_size = format_bytes(os.path.getsize(filepath))
             log_text = (
                 f"**New Download Event**\n\n"
                 f"**User:** {user.mention} (`{user.id}`)\n"
@@ -175,10 +183,7 @@ async def auto_download_handler(bot: Client, message: Message):
                 f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
                 f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
             )
-            try:
-                await bot.send_message(LOG_CHANNEL, log_text)
-            except:
-                pass
+            await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
         except FloodWait as e:
             await asyncio.sleep(e.value)
@@ -186,6 +191,8 @@ async def auto_download_handler(bot: Client, message: Message):
         except Exception as e:
             traceback.print_exc()
             await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+            if any(word in str(e).lower() for word in ["xxx", "porn", "sex"]):
+                await bot.send_message(ADMIN_ID, f"⚠️ Porn link detected from {message.from_user.mention} (`{message.from_user.id}`):\n{url}")
         finally:
             try:
                 if filepath and os.path.exists(filepath):
