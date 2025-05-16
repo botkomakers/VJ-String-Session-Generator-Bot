@@ -3,21 +3,33 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import LOG_CHANNEL
 from PIL import Image, ImageDraw, ImageFont
 import os
+import io
 
-from db import save_user, has_been_notified, set_notified  # Ensure these are implemented properly
+from db import save_user, has_been_notified, set_notified  # Ensure implemented
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+DEFAULT_PFP_PATH = "default_profile.png"  # ডিফল্ট ছবি তোমার প্রকল্পে রাখো
 
-def generate_user_image(name, username, user_id, profile_pic=None):
+def generate_user_image(name, username, user_id, profile_pic_path=None):
     img = Image.new("RGB", (800, 400), (30, 30, 30))
     draw = ImageDraw.Draw(img)
 
-    if profile_pic:
+    # Profile pic যোগ করা
+    if profile_pic_path and os.path.exists(profile_pic_path):
         try:
-            pfp = Image.open(profile_pic).convert("RGB").resize((200, 200))
+            pfp = Image.open(profile_pic_path).convert("RGB").resize((200, 200))
             img.paste(pfp, (30, 100))
         except Exception as e:
             print(f"Profile pic paste error: {e}")
+            # ফেইল হলে ডিফল্ট ছবি ব্যবহার
+            if os.path.exists(DEFAULT_PFP_PATH):
+                pfp = Image.open(DEFAULT_PFP_PATH).convert("RGB").resize((200, 200))
+                img.paste(pfp, (30, 100))
+    else:
+        # যদি প্রোফাইল না থাকে, ডিফল্ট ছবি পেস্ট করো
+        if os.path.exists(DEFAULT_PFP_PATH):
+            pfp = Image.open(DEFAULT_PFP_PATH).convert("RGB").resize((200, 200))
+            img.paste(pfp, (30, 100))
 
     font_big = ImageFont.truetype(FONT_PATH, 40)
     font_small = ImageFont.truetype(FONT_PATH, 30)
@@ -38,28 +50,27 @@ async def start_command(bot: Client, message: Message):
     user_id = user.id
     profile_photo_path = None
 
-    # Save user
+    # Save user info in DB
     save_user(user_id, user.first_name, user.username)
 
-    # Only if not notified before
     if not has_been_notified(user_id):
-        # Get profile photo
+        # প্রোফাইল ছবি ডাউনলোড করার চেষ্টা করো
         try:
             photos = await bot.get_profile_photos(user_id, limit=1)
-            if photos:
-                profile_photo_path = await bot.download_media(photos[0].file_id)
+            if photos.total_count > 0:
+                profile_photo_path = await bot.download_media(photos.photos[0].file_id)
         except Exception as e:
             print(f"Profile photo fetch failed: {e}")
 
-        # Generate image
+        # ছবি জেনারেট করো
         image_path = generate_user_image(
             name=user.first_name,
             username=user.username,
             user_id=user_id,
-            profile_pic=profile_photo_path
+            profile_pic_path=profile_photo_path
         )
 
-        # Send log to channel
+        # লগ চ্যানেলে পাঠাও
         try:
             await bot.send_photo(
                 chat_id=LOG_CHANNEL,
@@ -81,7 +92,7 @@ async def start_command(bot: Client, message: Message):
             if profile_photo_path and os.path.exists(profile_photo_path):
                 os.remove(profile_photo_path)
 
-    # Send welcome message to user (always)
+    # ইউজারকে স্বাগত বার্তা পাঠাও (সবসময়)
     await message.reply_photo(
         photo="https://i.ibb.co/rRj5vjLn/photo-2025-05-11-04-24-45-7504497537693253636.jpg",
         caption=(
