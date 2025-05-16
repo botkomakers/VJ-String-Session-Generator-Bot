@@ -22,4 +22,4 @@ pillow
 tqdm
 mega.py
 nest_asyncio
-tbdown
+git+https://github.com/ghyf/tbdown.git
