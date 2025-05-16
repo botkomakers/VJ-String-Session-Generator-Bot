@@ -4,14 +4,16 @@ import traceback
 import datetime
 import time
 import yt_dlp
+import nest_asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
+nest_asyncio.apply()  # Avoid "no running event loop" error
+
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-# Progress tracking dict to store last update time per message
 progress_update_times = {}
 
 def format_bytes(size):
@@ -37,6 +39,16 @@ def download_with_ytdlp(url, download_dir="/tmp", progress_hook=None):
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         return filename, info
+
+def download_mega_file(url, download_dir="/tmp"):
+    from mega import Mega
+    mega = Mega()
+    m = mega.login()  # Anonymous login
+    file = m.download_url(url, dest_path=download_dir)
+    return file.name, {
+        "title": file.name,
+        "ext": os.path.splitext(file.name)[1].lstrip(".")
+    }
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
@@ -76,7 +88,7 @@ def fix_google_drive_url(url):
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
-# FloodWait safe send/edit helper
+# FloodWait safe helpers
 async def safe_edit(message, text):
     try:
         await message.edit(text)
@@ -108,15 +120,11 @@ async def auto_download_handler(bot: Client, message: Message):
 
     for url in valid_urls:
         filepath = None
-
-        # For progress tracking on this message
         last_update_time = 0
 
-        # yt-dlp progress hook for downloading
         def ytdlp_progress_hook(d):
             nonlocal last_update_time
             now = time.time()
-            # Limit update frequency to 1 sec
             if now - last_update_time < 1:
                 return
             last_update_time = now
@@ -137,12 +145,10 @@ async def auto_download_handler(bot: Client, message: Message):
             processing = await safe_reply(message, f"Downloading from:\n{url}")
 
             if is_mega_link(url):
-                # For mega downloads, no progress implemented here (can be added with mega lib callbacks if needed)
                 filepath, info = await asyncio.to_thread(download_mega_file, url)
                 filepath = os.path.join("/tmp", filepath)
                 await safe_edit(processing, "Download completed.")
             else:
-                # yt-dlp download with progress
                 filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", ytdlp_progress_hook)
 
             if not os.path.exists(filepath):
@@ -154,11 +160,9 @@ async def auto_download_handler(bot: Client, message: Message):
             await processing.delete()
             uploading = await safe_reply(message, "Uploading... 0%")
 
-            # Upload progress callback
             def progress_func(current, total):
                 percent = (current / total) * 100
                 now = time.time()
-                # throttle updates to once every 1 second
                 if message.message_id not in progress_update_times:
                     progress_update_times[message.message_id] = 0
                 if now - progress_update_times[message.message_id] < 1:
