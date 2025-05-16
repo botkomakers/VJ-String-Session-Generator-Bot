@@ -1,31 +1,18 @@
 import os
+import aiohttp
 import asyncio
 import traceback
 import datetime
 import time
 import yt_dlp
-import nest_asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL
 
-nest_asyncio.apply()  # Avoid "no running event loop" error
-
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-progress_update_times = {}
-
-def format_bytes(size):
-    power = 1024
-    n = 0
-    units = ['B', 'KB', 'MB', 'GB', 'TB']
-    while size > power and n < len(units) - 1:
-        size /= power
-        n += 1
-    return f"{size:.2f} {units[n]}"
-
-def download_with_ytdlp(url, download_dir="/tmp", progress_hook=None):
+def download_with_ytdlp(url, download_dir="/tmp"):
     ydl_opts = {
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
@@ -33,8 +20,6 @@ def download_with_ytdlp(url, download_dir="/tmp", progress_hook=None):
         "no_warnings": True,
         "noplaylist": True,
     }
-    if progress_hook:
-        ydl_opts["progress_hooks"] = [progress_hook]
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
@@ -49,6 +34,15 @@ def download_mega_file(url, download_dir="/tmp"):
         "title": file.name,
         "ext": os.path.splitext(file.name)[1].lstrip(".")
     }
+
+def format_bytes(size):
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
@@ -88,68 +82,35 @@ def fix_google_drive_url(url):
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
-# FloodWait safe helpers
-async def safe_edit(message, text):
-    try:
-        await message.edit(text)
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        await message.edit(text)
-    except:
-        pass
-
-async def safe_reply(message, text):
-    try:
-        return await message.reply_text(text)
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        return await message.reply_text(text)
-    except:
-        pass
-
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
-    notice = await safe_reply(message, "Analyzing link(s)...")
+    try:
+        notice = await message.reply_text("Analyzing link(s)...")
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        notice = await message.reply_text("Analyzing link(s)...")
 
     valid_urls = [url for url in urls if url.lower().startswith("http")]
     if not valid_urls:
-        return await safe_edit(notice, "No valid links detected.")
+        return await notice.edit("No valid links detected.")
 
-    await safe_edit(notice, f"Found {len(valid_urls)} link(s). Starting download...")
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
     for url in valid_urls:
         filepath = None
-        last_update_time = 0
-
-        def ytdlp_progress_hook(d):
-            nonlocal last_update_time
-            now = time.time()
-            if now - last_update_time < 1:
-                return
-            last_update_time = now
-            if d['status'] == 'downloading':
-                percent = d.get('_percent_str', '0.0%').strip()
-                speed = d.get('_speed_str', 'N/A').strip()
-                eta = d.get('_eta_str', 'N/A').strip()
-                text = f"Downloading: {percent} at {speed}, ETA: {eta}"
-                asyncio.create_task(safe_edit(processing, text))
-            elif d['status'] == 'finished':
-                asyncio.create_task(safe_edit(processing, "Download completed, processing file..."))
-
         try:
             if is_google_drive_link(url):
                 url = fix_google_drive_url(url)
 
             await notice.delete()
-            processing = await safe_reply(message, f"Downloading from:\n{url}")
+            processing = await message.reply_text(f"Downloading from:\n{url}")
 
             if is_mega_link(url):
                 filepath, info = await asyncio.to_thread(download_mega_file, url)
                 filepath = os.path.join("/tmp", filepath)
-                await safe_edit(processing, "Download completed.")
             else:
-                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", ytdlp_progress_hook)
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
@@ -158,33 +119,19 @@ async def auto_download_handler(bot: Client, message: Message):
             caption = f"**Downloaded from:**\n{url}"
 
             await processing.delete()
-            uploading = await safe_reply(message, "Uploading... 0%")
-
-            def progress_func(current, total):
-                percent = (current / total) * 100
-                now = time.time()
-                if message.message_id not in progress_update_times:
-                    progress_update_times[message.message_id] = 0
-                if now - progress_update_times[message.message_id] < 1:
-                    return
-                progress_update_times[message.message_id] = now
-                asyncio.create_task(safe_edit(uploading, f"Uploading... {percent:.1f}%"))
+            uploading = await message.reply_text("Uploading...")
 
             if ext.lower() in VIDEO_EXTENSIONS:
                 thumb = generate_thumbnail(filepath)
                 await message.reply_video(
                     video=filepath,
                     caption=caption,
-                    thumb=thumb if thumb else None,
-                    progress=progress_func,
-                    progress_args=()
+                    thumb=thumb if thumb else None
                 )
             else:
                 await message.reply_document(
                     document=filepath,
-                    caption=caption,
-                    progress=progress_func,
-                    progress_args=()
+                    caption=caption
                 )
 
             await uploading.delete()
@@ -210,7 +157,7 @@ async def auto_download_handler(bot: Client, message: Message):
             continue
         except Exception as e:
             traceback.print_exc()
-            await safe_reply(message, f"\u274c Failed to download:\n{url}\n\n**{e}**")
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
         finally:
             try:
                 if filepath and os.path.exists(filepath):
