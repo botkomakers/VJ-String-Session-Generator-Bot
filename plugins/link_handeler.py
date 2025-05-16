@@ -8,9 +8,11 @@ import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-from config import LOG_CHANNEL
+from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+
+PORN_KEYWORDS = ["porn", "xvideos", "redtube", "sex", "hentai", "xnxx", "xxx", "18+", "hot", "erotic", "nude"]
 
 # Helper: Format bytes to readable format
 def format_bytes(size):
@@ -61,7 +63,7 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-# Checker: Google Drive
+# Google Drive
 def is_google_drive_link(url):
     return "drive.google.com" in url
 
@@ -73,7 +75,7 @@ def fix_google_drive_url(url):
         return f"https://drive.google.com/uc?id={file_id}&export=download"
     return url
 
-# Checker: Mega
+# Mega.nz
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
@@ -87,10 +89,8 @@ def download_mega_file(url, download_dir="/tmp"):
         "ext": os.path.splitext(file.name)[1].lstrip(".")
     }
 
-# Downloader: yt-dlp
+# yt-dlp
 def download_with_ytdlp(url, download_dir="/tmp", message=None):
-    downloaded_file = {}
-
     def hook(d):
         if d['status'] == 'downloading' and message:
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -114,7 +114,10 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
         filename = ydl.prepare_filename(info)
         return filename, info
 
-# Handler
+def is_porn_link(url):
+    url_lower = url.lower()
+    return any(keyword in url_lower for keyword in PORN_KEYWORDS)
+
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
     urls = message.text.strip().split()
@@ -133,6 +136,19 @@ async def auto_download_handler(bot: Client, message: Message):
     for url in valid_urls:
         filepath = None
         try:
+            if is_porn_link(url):
+                user = message.from_user
+                warning_text = (
+                    f"**Pornographic Link Detected!**\n\n"
+                    f"**User:** {user.mention} (`{user.id}`)\n"
+                    f"**Link:** `{url}`\n"
+                    f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+                )
+                await bot.send_message(ADMIN_ID, warning_text)
+                await bot.send_message(LOG_CHANNEL, warning_text)
+                await notice.edit("❌ Pornographic content is not allowed!")
+                continue
+
             if is_google_drive_link(url):
                 url = fix_google_drive_url(url)
 
