@@ -12,7 +12,6 @@ from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
-# Helper: Format bytes to readable format
 def format_bytes(size):
     power = 1024
     n = 0
@@ -22,7 +21,6 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {units[n]}"
 
-# Helper: Generate thumbnail
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         import subprocess
@@ -35,7 +33,6 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-# Progress bar
 def make_progress_bar(current, total, length=20):
     percent = current / total
     filled_length = int(length * percent)
@@ -50,7 +47,6 @@ async def progress_callback(current, total, message: Message, action="Downloadin
     except:
         pass
 
-# Auto clean
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
     for filename in os.listdir(path):
@@ -63,7 +59,6 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-# Google Drive checker
 def is_google_drive_link(url):
     return "drive.google.com" in url
 
@@ -75,7 +70,6 @@ def fix_google_drive_url(url):
         return f"https://drive.google.com/uc?id={file_id}&export=download"
     return url
 
-# Mega checker
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
@@ -89,7 +83,6 @@ def download_mega_file(url, download_dir="/tmp"):
         "ext": os.path.splitext(file.name)[1].lstrip(".")
     }
 
-# yt-dlp downloader
 def download_with_ytdlp(url, download_dir="/tmp", message=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -152,13 +145,13 @@ async def auto_download_handler(bot: Client, message: Message):
 
             ext = os.path.splitext(filepath)[1]
             caption = (
-                f"❗️❗️❗️IMPORTANT❗️❗️❗️\n\n"
-                f"ᴛʜɪs ᴍᴇssᴀɢᴇ ᴡɪʟʟ ʙᴇ ᴅᴇʟᴇᴛᴇᴅ ɪɴ 5 ᴍɪɴs\n"
-                f"ᴘʟᴇᴀsᴇ ғᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ sᴀᴠᴇᴅ ᴍᴇssᴀɢᴇs\n\n"
-                f"**Downloaded from:**\n{url}"
+                "**⚠️ IMPORTANT NOTICE ⚠️**\n\n"
+                "This video will be **automatically deleted in 5 minutes** due to copyright policies.\n"
+                "Please **forward** it to your **Saved Messages** or any private chat to keep a copy.\n\n"
+                f"**Source:** [Click to open]({url})"
             )
 
-            await processing.edit("Uploading...")
+            upload_msg = await processing.edit("Uploading...")
 
             thumb = generate_thumbnail(filepath)
 
@@ -176,10 +169,9 @@ async def auto_download_handler(bot: Client, message: Message):
                     reply_to_message_id=message.id
                 )
 
-            # Delete in 5 mins
+            await upload_msg.delete()
             asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))
 
-            # Log
             user = message.from_user
             file_size = format_bytes(os.path.getsize(filepath))
             log_text = (
@@ -193,7 +185,6 @@ async def auto_download_handler(bot: Client, message: Message):
             )
             await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
-            # Porn detection
             if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
                 alert = (
                     f"⚠️ **Porn link detected**\n"
