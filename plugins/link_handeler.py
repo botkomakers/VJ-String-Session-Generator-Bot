@@ -1,531 +1,305 @@
 import os
-import aiohttp
 import asyncio
-import traceback
-import datetime
 import time
-import yt_dlp
-import hashlib
-from typing import List, Tuple, Dict, Optional
+import datetime
+import subprocess
+import traceback
+import shutil
 from pyrogram import Client, filters
-from pyrogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-    InputMediaPhoto
-)
+from pyrogram.types import Message
 from pyrogram.errors import FloodWait
-from config import LOG_CHANNEL, ADMINS, MAX_CONCURRENT_DOWNLOADS
-from dataclasses import dataclass
-from enum import Enum, auto
+import yt_dlp
 
-# Constants
+from config import API_ID, API_HASH, BOT_TOKEN, LOG_CHANNEL
+
+# Constants and Limits
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-AUDIO_EXTENSIONS = [".mp3", ".wav", ".ogg", ".m4a"]
-IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"]
-MAX_DAILY_QUOTA = 2 * 1024 * 1024 * 1024  # 2 GB
-PART_SIZE = int(1.7 * 1024 * 1024 * 1024)  # 1.7 GB
-TEMP_DIR = "/tmp/ytdl_bot"
-THUMBNAIL_PATH = os.path.join(TEMP_DIR, "thumbnail.jpg")
-os.makedirs(TEMP_DIR, exist_ok=True)
+TELEGRAM_MAX_SIZE = 2 * 1024 * 1024 * 1024  # 2GB Telegram max file size
+SAFETY_MARGIN = 50 * 1024 * 1024  # 50MB safety margin
+MAX_UPLOAD_SIZE = TELEGRAM_MAX_SIZE - SAFETY_MARGIN  # ~1.95GB
 
-# Enums
-class DownloadQuality(Enum):
-    BEST = auto()
-    HD_1080 = auto()
-    HD_720 = auto()
-    SD_480 = auto()
-    AUDIO_ONLY = auto()
+DOWNLOAD_BASE_DIR = "/tmp/downloads"
+os.makedirs(DOWNLOAD_BASE_DIR, exist_ok=True)
 
-class DownloadStatus(Enum):
-    PENDING = auto()
-    DOWNLOADING = auto()
-    PROCESSING = auto()
-    UPLOADING = auto()
-    COMPLETED = auto()
-    FAILED = auto()
+# Semaphore to limit concurrent downloads/uploads
+MAX_CONCURRENT_TASKS = 3
+sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
-# Data Classes
-@dataclass
-class UserQuota:
-    user_id: int
-    used_bytes: int = 0
-    last_reset: datetime.date = datetime.date.today()
+bot = Client("yt_dl_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-@dataclass
-class DownloadTask:
-    url: str
-    message: Message
-    status: DownloadStatus = DownloadStatus.PENDING
-    progress: float = 0.0
-    file_path: str = ""
-    file_size: int = 0
-    quality: DownloadQuality = DownloadQuality.BEST
-    parts: List[str] = None
-    start_time: float = time.time()
-    end_time: float = 0
 
-# Global State
-USER_QUOTA: Dict[int, UserQuota] = {}
-ACTIVE_DOWNLOADS: Dict[str, DownloadTask] = {}
-TASK_QUEUE = asyncio.Queue()
-CURRENT_DOWNLOADS = 0
+def format_bytes(size):
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
 
-# UI Components
-class UI:
-    @staticmethod
-    async def send_welcome_message(client: Client, message: Message):
-        welcome_text = """
-🌟 **Welcome to Advanced YouTube Downloader Bot** 🌟
 
-🔹 Download videos from YouTube and other supported sites
-🔹 Multiple quality options available
-🔹 Automatic splitting for large files
-🔹 Quota tracking system
-
-📌 **How to use:**
-1. Send a YouTube link
-2. Choose your preferred quality
-3. Wait for the download to complete
-
-📊 Your daily quota: {quota}
-"""
-        user_quota = UI.get_user_quota(message.from_user.id)
-        quota_text = f"{UI.format_bytes(user_quota.used_bytes)} / {UI.format_bytes(MAX_DAILY_QUOTA)}"
-        
-        await message.reply(
-            text=welcome_text.format(quota=quota_text),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📚 Supported Sites", callback_data="supported_sites")],
-                [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
-            )
+def generate_thumbnail(file_path, output_thumb=None):
+    if not output_thumb:
+        output_thumb = os.path.join(os.path.dirname(file_path), "thumb.jpg")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
+        if os.path.exists(output_thumb):
+            return output_thumb
+        return None
+    except Exception as e:
+        print(f"Thumbnail generation failed: {e}")
+        return None
 
-    @staticmethod
-    async def send_quality_menu(client: Client, message: Message, url: str):
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🎥 Best Quality", callback_data=f"quality_{url}_best"),
-                InlineKeyboardButton("🎥 1080p", callback_data=f"quality_{url}_1080")
-            ],
-            [
-                InlineKeyboardButton("🎥 720p", callback_data=f"quality_{url}_720"),
-                InlineKeyboardButton("🎥 480p", callback_data=f"quality_{url}_480")
-            ],
-            [
-                InlineKeyboardButton("🎵 Audio Only", callback_data=f"quality_{url}_audio"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{url}")
-            ]
-        ])
-        
-        await message.reply(
-            text=f"🔍 **Select Quality for:**\n{url}",
-            reply_markup=keyboard
-        )
 
-    @staticmethod
-    async def update_progress_message(task: DownloadTask):
-        elapsed = time.time() - task.start_time
-        progress_text = ""
-        
-        if task.status == DownloadStatus.DOWNLOADING:
-            progress_text = f"⬇️ Downloading... {task.progress:.1f}%"
-        elif task.status == DownloadStatus.PROCESSING:
-            progress_text = "🔧 Processing video..."
-        elif task.status == DownloadStatus.UPLOADING:
-            progress_text = f"⬆️ Uploading... {task.progress:.1f}%"
-        
-        speed = task.file_size / elapsed if elapsed > 0 else 0
-        eta = (100 - task.progress) * elapsed / task.progress if task.progress > 0 else 0
-        
-        text = f"""
-📥 **Download Info**
-🔗 URL: {task.url}
-📊 Status: {task.status.name}
-📈 Progress: {progress_text}
-📦 File Size: {UI.format_bytes(task.file_size)}
-🚀 Speed: {UI.format_bytes(speed)}/s
-⏳ ETA: {UI.format_time(eta)}
-"""
-        
-        try:
-            await task.message.edit_text(text)
-        except:
-            pass
-
-    @staticmethod
-    async def send_completion_message(task: DownloadTask, client: Client):
-        elapsed = time.time() - task.start_time
-        text = f"""
-✅ **Download Complete!**
-🔗 URL: {task.url}
-📦 File Size: {UI.format_bytes(task.file_size)}
-⏱️ Time Taken: {UI.format_time(elapsed)}
-"""
-        
-        await task.message.reply(text)
-        
-        # Send to log channel
-        user = task.message.from_user
-        log_text = f"""
-📥 **Download Completed**
-👤 User: [{user.first_name}](tg://user?id={user.id})
-🔗 URL: {task.url}
-📊 Quality: {task.quality.name}
-📦 Size: {UI.format_bytes(task.file_size)}
-⏱️ Time: {UI.format_time(elapsed)}
-"""
-        await client.send_message(LOG_CHANNEL, log_text)
-
-    @staticmethod
-    async def send_error_message(message: Message, error: str, url: str = None):
-        text = f"""
-❌ **Download Failed**
-{f'🔗 URL: {url}\n' if url else ''}
-⚠️ Error: {error}
-"""
-        await message.reply(text)
-
-    @staticmethod
-    def format_bytes(size: float) -> str:
-        power = 1024
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        n = 0
-        while size > power and n < len(units) - 1:
-            size /= power
-            n += 1
-        return f"{size:.2f} {units[n]}"
-
-    @staticmethod
-    def format_time(seconds: float) -> str:
-        if seconds < 60:
-            return f"{seconds:.0f}s"
-        minutes, seconds = divmod(seconds, 60)
-        if minutes < 60:
-            return f"{minutes:.0f}m {seconds:.0f}s"
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours:.0f}h {minutes:.0f}m"
-
-    @staticmethod
-    def get_user_quota(user_id: int) -> UserQuota:
-        today = datetime.date.today()
-        if user_id not in USER_QUOTA or USER_QUOTA[user_id].last_reset < today:
-            USER_QUOTA[user_id] = UserQuota(user_id=user_id, last_reset=today)
-        return USER_QUOTA[user_id]
-
-# Utility Functions
-class Utils:
-    @staticmethod
-    def generate_thumbnail(video_path: str) -> Optional[str]:
-        try:
-            import subprocess
-            subprocess.run(
-                ["ffmpeg", "-i", video_path, "-ss", "00:00:01.000", 
-                 "-vframes", "1", THUMBNAIL_PATH],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            return THUMBNAIL_PATH if os.path.exists(THUMBNAIL_PATH) else None
-        except:
-            return None
-
-    @staticmethod
-    def get_file_extension(file_path: str) -> str:
-        return os.path.splitext(file_path)[1].lower()
-
-    @staticmethod
-    def split_large_file(file_path: str, part_size: int = PART_SIZE) -> List[str]:
-        parts = []
-        part_num = 1
-        with open(file_path, 'rb') as f:
-            while True:
-                chunk = f.read(part_size)
-                if not chunk:
-                    break
-                part_path = f"{file_path}.part{part_num:03d}"
-                with open(part_path, 'wb') as part_file:
-                    part_file.write(chunk)
-                parts.append(part_path)
-                part_num += 1
-        return parts
-
-    @staticmethod
-    def clean_temp_files():
-        now = time.time()
-        for filename in os.listdir(TEMP_DIR):
-            file_path = os.path.join(TEMP_DIR, filename)
-            if os.path.isfile(file_path):
-                # Delete files older than 1 hour
-                if now - os.path.getmtime(file_path) > 3600:
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
-
-    @staticmethod
-    def ydl_progress_hook(d: dict, task: DownloadTask):
-        if d['status'] == 'downloading':
-            task.progress = float(d.get('_percent_str', '0%').strip('%'))
-            task.status = DownloadStatus.DOWNLOADING
-        elif d['status'] == 'finished':
-            task.status = DownloadStatus.PROCESSING
-            task.progress = 100
-
-    @staticmethod
-    def build_ydl_opts(url: str, quality: DownloadQuality = DownloadQuality.BEST) -> dict:
-        download_dir = TEMP_DIR
-        format_map = {
-            DownloadQuality.BEST: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
-            DownloadQuality.HD_1080: "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best",
-            DownloadQuality.HD_720: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best",
-            DownloadQuality.SD_480: "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best",
-            DownloadQuality.AUDIO_ONLY: "bestaudio[ext=m4a]"
-        }
-        
-        return {
-            "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
-            "format": format_map[quality],
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "progress_hooks": [lambda d: Utils.ydl_progress_hook(d, ACTIVE_DOWNLOADS[url])],
-            "postprocessors": [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4'
-            }] if quality != DownloadQuality.AUDIO_ONLY else []
-        }
-
-# Download Manager
-class DownloadManager:
-    @staticmethod
-    async def process_queue():
-        global CURRENT_DOWNLOADS
-        while True:
-            if CURRENT_DOWNLOADS < MAX_CONCURRENT_DOWNLOADS:
-                task = await TASK_QUEUE.get()
-                CURRENT_DOWNLOADS += 1
-                asyncio.create_task(DownloadManager.handle_download(task))
-            await asyncio.sleep(1)
-
-    @staticmethod
-    async def handle_download(task: DownloadTask):
-        try:
-            # Check quota
-            user_quota = UI.get_user_quota(task.message.from_user.id)
-            if user_quota.used_bytes >= MAX_DAILY_QUOTA:
-                await UI.send_error_message(
-                    task.message,
-                    "You have reached your daily quota limit.",
-                    task.url
-                )
-                return
-
-            # Start download
-            ACTIVE_DOWNLOADS[task.url] = task
-            task.status = DownloadStatus.DOWNLOADING
-            
-            # Download with yt-dlp
-            filepath, info = await DownloadManager.download_with_ytdlp(task)
-            
-            if not os.path.exists(filepath):
-                raise Exception("Download failed or file not found.")
-            
-            # Update task info
-            task.file_path = filepath
-            task.file_size = os.path.getsize(filepath)
-            
-            # Check quota again after knowing file size
-            if user_quota.used_bytes + task.file_size > MAX_DAILY_QUOTA:
-                await UI.send_error_message(
-                    task.message,
-                    "This download would exceed your daily quota limit.",
-                    task.url
-                )
-                os.remove(filepath)
-                return
-            
-            # Process file
-            task.status = DownloadStatus.PROCESSING
-            await UI.update_progress_message(task)
-            
-            # Split if needed
-            task.parts = [filepath]
-            if task.file_size > PART_SIZE:
-                task.parts = Utils.split_large_file(filepath)
-            
-            # Upload files
-            task.status = DownloadStatus.UPLOADING
-            await DownloadManager.upload_files(task)
-            
-            # Update quota
-            user_quota.used_bytes += task.file_size
-            
-            # Cleanup
-            task.status = DownloadStatus.COMPLETED
-            task.end_time = time.time()
-            await UI.send_completion_message(task, task.message._client)
-            
-        except Exception as e:
-            task.status = DownloadStatus.FAILED
-            await UI.send_error_message(task.message, str(e), task.url)
-            traceback_text = traceback.format_exc()
-            for admin in ADMINS:
+async def auto_cleanup(path=DOWNLOAD_BASE_DIR, max_age=900):
+    now = time.time()
+    for filename in os.listdir(path):
+        file_path = os.path.join(path, filename)
+        if os.path.isfile(file_path):
+            age = now - os.path.getmtime(file_path)
+            if age > max_age:
                 try:
-                    await task.message._client.send_message(
-                        admin,
-                        f"Error on {task.url}:\n\n{traceback_text}"
-                    )
+                    os.remove(file_path)
                 except:
                     pass
-        finally:
-            DownloadManager.cleanup_task(task)
-            global CURRENT_DOWNLOADS
-            CURRENT_DOWNLOADS -= 1
 
-    @staticmethod
-    async def download_with_ytdlp(task: DownloadTask) -> Tuple[str, dict]:
-        ydl_opts = Utils.build_ydl_opts(task.url, task.quality)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = await asyncio.to_thread(ydl.extract_info, task.url, download=True)
-            filename = ydl.prepare_filename(info)
+
+async def split_video(filepath):
+    """
+    Split video into chunks of max ~1.9GB for Telegram upload.
+    Returns list of filepaths.
+    """
+    chunk_size = MAX_UPLOAD_SIZE
+    file_size = os.path.getsize(filepath)
+    if file_size <= chunk_size:
+        return [filepath]
+
+    base_name, ext = os.path.splitext(filepath)
+    output_files = []
+
+    total_parts = (file_size // chunk_size) + 1
+    print(f"Splitting file into {total_parts} parts...")
+
+    for i in range(total_parts):
+        part_path = f"{base_name}_part{i + 1}{ext}"
+        start = i * chunk_size
+        duration = None  # We'll calculate duration dynamically using ffprobe
+
+        # Using ffmpeg to split based on size is tricky; better to split by duration
+        # First, calculate total duration of video
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            total_duration = float(result.stdout.strip())
+            # Calculate duration per chunk
+            duration = (total_duration / total_parts)
+        except Exception:
+            # fallback if ffprobe fails
+            duration = None
+
+        # Build ffmpeg command to split
+        if duration:
+            cmd = [
+                "ffmpeg", "-i", filepath,
+                "-ss", str(duration * i),
+                "-t", str(duration),
+                "-c", "copy",
+                part_path,
+                "-y"
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(part_path):
+                output_files.append(part_path)
+        else:
+            # If duration unknown, just return original file (won't split)
+            return [filepath]
+
+    return output_files
+
+
+async def download_with_ytdlp(url, download_dir):
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36"
+        }
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
         return filename, info
 
-    @staticmethod
-    async def upload_files(task: DownloadTask):
-        client = task.message._client
-        user = task.message.from_user
-        ext = Utils.get_file_extension(task.file_path)
-        thumbnail = None
-        
-        if ext in VIDEO_EXTENSIONS:
-            thumbnail = Utils.generate_thumbnail(task.file_path)
-        
-        for idx, part in enumerate(task.parts):
-            part_num = f" (Part {idx+1}/{len(task.parts)})" if len(task.parts) > 1 else ""
-            caption = f"📥 {os.path.basename(part)}{part_num}\n🔗 From: {task.url}"
-            
-            # Update progress
-            task.progress = (idx / len(task.parts)) * 100
-            await UI.update_progress_message(task)
-            
+
+async def send_progress_message(message: Message, text: str):
+    try:
+        await message.edit(text)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        await message.edit(text)
+    except:
+        pass
+
+
+@bot.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
+async def handle_message(client: Client, message: Message):
+    urls = message.text.strip().split()
+    valid_urls = [url for url in urls if url.lower().startswith("http")]
+
+    if not valid_urls:
+        return await message.reply_text("No valid URLs found in your message!")
+
+    user_dir = os.path.join(DOWNLOAD_BASE_DIR, str(message.from_user.id))
+    os.makedirs(user_dir, exist_ok=True)
+
+    notice = await message.reply_text(f"Detected {len(valid_urls)} URL(s). Starting downloads...")
+
+    async with sem:
+        for url in valid_urls:
+            filepath = None
             try:
-                if ext in VIDEO_EXTENSIONS:
-                    await client.send_video(
-                        chat_id=task.message.chat.id,
-                        video=part,
-                        caption=caption,
-                        thumb=thumbnail,
-                        progress=lambda current, total: DownloadManager.upload_progress(
-                            current, total, task, idx, len(task.parts)
-                        )
-                    )
-                elif ext in AUDIO_EXTENSIONS:
-                    await client.send_audio(
-                        chat_id=task.message.chat.id,
-                        audio=part,
-                        caption=caption,
-                        progress=lambda current, total: DownloadManager.upload_progress(
-                            current, total, task, idx, len(task.parts)
-                    )
+                await send_progress_message(notice, f"Downloading:\n{url}")
+
+                # Download file (in thread to avoid blocking)
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, user_dir)
+
+                if not os.path.exists(filepath):
+                    raise Exception("Downloaded file not found!")
+
+                file_size = os.path.getsize(filepath)
+
+                # Split if file too big
+                if file_size > MAX_UPLOAD_SIZE:
+                    await send_progress_message(notice, "File too large, splitting now...")
+                    parts = await split_video(filepath)
+                    os.remove(filepath)  # remove original large file
+
+                    # Upload all parts one by one
+                    for part_file in parts:
+                        part_size = os.path.getsize(part_file)
+                        if part_size > MAX_UPLOAD_SIZE:
+                            await send_progress_message(notice, f"Part file too large: {os.path.basename(part_file)}")
+                            continue
+
+                        ext = os.path.splitext(part_file)[1].lower()
+                        caption = f"**Downloaded from:**\n{url}\n(part file)"
+
+                        if ext in VIDEO_EXTENSIONS:
+                            thumb = generate_thumbnail(part_file)
+                            await message.reply_video(
+                                video=part_file,
+                                caption=caption,
+                                thumb=thumb,
+                                supports_streaming=True,
+                            )
+                        else:
+                            await message.reply_document(
+                                document=part_file,
+                                caption=caption,
+                            )
+
+                        os.remove(part_file)
                 else:
-                    await client.send_document(
-                        chat_id=task.message.chat.id,
-                        document=part,
-                        caption=caption,
-                        progress=lambda current, total: DownloadManager.upload_progress(
-                            current, total, task, idx, len(task.parts)
-                    )
+                    ext = os.path.splitext(filepath)[1].lower()
+                    caption = f"**Downloaded from:**\n{url}"
+
+                    await send_progress_message(notice, "Uploading to Telegram...")
+
+                    if ext in VIDEO_EXTENSIONS:
+                        thumb = generate_thumbnail(filepath)
+                        await message.reply_video(
+                            video=filepath,
+                            caption=caption,
+                            thumb=thumb,
+                            supports_streaming=True,
+                        )
+                    else:
+                        await message.reply_document(
+                            document=filepath,
+                            caption=caption,
+                        )
+
+                # Logging
+                user = message.from_user
+                log_msg = (
+                    f"📥 **New Download**\n\n"
+                    f"👤 User: {user.mention} (`{user.id}`)\n"
+                    f"🔗 Link: `{url}`\n"
+                    f"📁 File: `{os.path.basename(filepath)}`\n"
+                    f"💾 Size: {format_bytes(file_size)}\n"
+                    f"📅 Time: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+                )
+                try:
+                    await client.send_message(LOG_CHANNEL, log_msg)
+                except Exception:
+                    pass
+
             except FloodWait as e:
                 await asyncio.sleep(e.value)
                 continue
+            except Exception as e:
+                traceback.print_exc()
+                await message.reply_text(f"❌ Failed to download:\n{url}\n\n**Error:** {e}")
+            finally:
+                try:
+                    if filepath and os.path.exists(filepath):
+                        os.remove(filepath)
+                    thumb_path = os.path.join(user_dir, "thumb.jpg")
+                    if os.path.exists(thumb_path):
+                        os.remove(thumb_path)
+                    await auto_cleanup(user_dir)
+                except:
+                    pass
 
-    @staticmethod
-    def upload_progress(current: int, total: int, task: DownloadTask, part_idx: int, total_parts: int):
-        part_progress = (current / total) * 100
-        overall_progress = (part_idx + (part_progress / 100)) / total_parts * 100
-        task.progress = overall_progress
-        asyncio.create_task(UI.update_progress_message(task))
+    await notice.delete()
 
-    @staticmethod
-    def cleanup_task(task: DownloadTask):
-        try:
-            if task.file_path and os.path.exists(task.file_path):
-                os.remove(task.file_path)
-            if task.parts:
-                for part in task.parts:
-                    if os.path.exists(part):
-                        os.remove(part)
-            if os.path.exists(THUMBNAIL_PATH):
-                os.remove(THUMBNAIL_PATH)
-            Utils.clean_temp_files()
-        except:
-            pass
-        ACTIVE_DOWNLOADS.pop(task.url, None)
 
-# Bot Handlers
-@Client.on_message(filters.command(["start", "help"]))
-async def start_handler(client: Client, message: Message):
-    await UI.send_welcome_message(client, message)
+@bot.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    await message.reply_text(
+        "Welcome! Send me any video or playlist URL and I'll download it for you.\n"
+        "Commands:\n"
+        "/start - Show this message\n"
+        "/help - Get help info\n"
+    )
 
-@Client.on_message(filters.text & ~filters.command(["start", "help", "quota", "status"]))
-async def url_handler(client: Client, message: Message):
-    urls = message.text.strip().split()
-    valid_urls = [url for url in urls if url.lower().startswith(("http://", "https://"))]
-    
-    if not valid_urls:
-        return await message.reply("❌ No valid URLs found in your message.")
-    
-    for url in valid_urls:
-        if url in ACTIVE_DOWNLOADS:
-            await message.reply(f"⏳ This URL is already being processed: {url}")
-            continue
-        
-        await UI.send_quality_menu(client, message, url)
 
-@Client.on_callback_query()
-async def callback_handler(client: Client, callback_query: CallbackQuery):
-    data = callback_query.data
-    user_id = callback_query.from_user.id
-    
-    if data.startswith("quality_"):
-        _, url, quality = data.split("_")
-        quality_map = {
-            "best": DownloadQuality.BEST,
-            "1080": DownloadQuality.HD_1080,
-            "720": DownloadQuality.HD_720,
-            "480": DownloadQuality.SD_480,
-            "audio": DownloadQuality.AUDIO_ONLY
-        }
-        
-        task = DownloadTask(
-            url=url,
-            message=callback_query.message,
-            quality=quality_map[quality]
-        )
-        
-        await TASK_QUEUE.put(task)
-        await callback_query.answer(f"Added to queue. Quality: {quality}")
-        
-    elif data == "supported_sites":
-        await callback_query.answer("All sites supported by yt-dlp", show_alert=True)
-    
-    elif data == "settings":
-        await callback_query.answer("Settings menu coming soon!")
-    
-    elif data.startswith("cancel_"):
-        _, url = data.split("_")
-        if url in ACTIVE_DOWNLOADS:
-            # Implement cancellation logic
-            pass
-        await callback_query.answer("Download cancelled")
-        await callback_query.message.delete()
+@bot.on_message(filters.command("help"))
+async def help_command(client: Client, message: Message):
+    await message.reply_text(
+        "Usage:\n"
+        "Just send me video URLs.\n"
+        "I will download and send back the video/document.\n"
+        "Max file size ~1.95GB (due to Telegram limits).\n"
+        "Supports many sites via yt-dlp.\n"
+        "For issues contact admin."
+    )
 
-# Initialize
-async def initialize():
-    asyncio.create_task(DownloadManager.process_queue())
 
-# Start the bot
 if __name__ == "__main__":
-    app = Client("yt_downloader_bot")
-    app.run(initialize())
+    try:
+        import shutil
+
+        for binary in ["ffmpeg", "yt-dlp"]:
+            if not shutil.which(binary):
+                print(f"Required binary '{binary}' not found. Please install it before running the bot.")
+                exit(1)
+    except Exception as e:
+        print(e)
+        exit(1)
+
+    print("Bot is starting...")
+    bot.run()
