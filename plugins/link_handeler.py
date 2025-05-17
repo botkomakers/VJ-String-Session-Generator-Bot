@@ -124,6 +124,12 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
+    if message.from_user.is_bot:
+        return  # Ignore messages from bots
+
+    if message.reply_to_message:
+        return  # Ignore replies
+
     urls = message.text.strip().split()
     try:
         notice = await message.reply_text("Analyzing link(s)...")
