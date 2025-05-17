@@ -1,3 +1,5 @@
+# -------------------- Downloader Bot --------------------
+
 import os
 import aiohttp
 import asyncio
@@ -12,7 +14,6 @@ from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]
-
 DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"
 
 def format_bytes(size):
@@ -194,8 +195,9 @@ async def start_download(bot, message: Message, url: str, mode: str):
 
         upload_msg = await processing.edit("Uploading...")
         thumb = generate_thumbnail(filepath)
-        if not thumb and ext.lower() in AUDIO_EXTENSIONS:
-            thumb = DEFAULT_THUMB
+        if not thumb or not os.path.exists(str(thumb)):
+            if ext.lower() in AUDIO_EXTENSIONS:
+                thumb = DEFAULT_THUMB
 
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Source Link", url=url)],
@@ -215,7 +217,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
             sent = await message.reply_document(
                 document=filepath,
                 caption=caption,
-                thumb=thumb if os.path.exists(str(thumb)) else None,
+                thumb=thumb if thumb.startswith("http") or os.path.exists(str(thumb)) else None,
                 reply_to_message_id=message.id,
                 reply_markup=buttons
             )
@@ -267,3 +269,38 @@ async def auto_delete_message(bot, chat_id, message_id, delay):
         await bot.delete_messages(chat_id, message_id)
     except:
         pass
+
+@Client.on_message(filters.private & ~filters.command("start"))
+async def log_everything(bot: Client, message: Message):
+    user = message.from_user
+    log_text = (
+        f"New Message from {user.mention} ({user.id})\n"
+        f"Name: {user.first_name or ''} {user.last_name or ''}\n"
+        f"Username: @{user.username if user.username else 'N/A'}\n"
+        f"User ID: {user.id}\n\n"
+        f"Message Type: {message.media if message.media else 'Text'}"
+    )
+
+    try:
+        if message.text:
+            await bot.send_message(LOG_CHANNEL, log_text + f"\n\nMessage:\n{message.text}")
+        elif message.photo:
+            await bot.send_photo(LOG_CHANNEL, photo=message.photo.file_id, caption=log_text)
+        elif message.video:
+            await bot.send_video(LOG_CHANNEL, video=message.video.file_id, caption=log_text)
+        elif message.document:
+            await bot.send_document(LOG_CHANNEL, document=message.document.file_id, caption=log_text)
+        elif message.audio:
+            await bot.send_audio(LOG_CHANNEL, audio=message.audio.file_id, caption=log_text)
+        elif message.voice:
+            await bot.send_voice(LOG_CHANNEL, voice=message.voice.file_id, caption=log_text)
+        elif message.sticker:
+            await bot.send_sticker(LOG_CHANNEL, sticker=message.sticker.file_id)
+        elif message.contact:
+            await bot.send_message(LOG_CHANNEL, log_text + "\n\nContact shared.")
+        elif message.location:
+            await bot.send_location(LOG_CHANNEL, latitude=message.location.latitude, longitude=message.location.longitude)
+        else:
+            await bot.send_message(LOG_CHANNEL, log_text + "\n\nUnsupported message type.")
+    except Exception as e:
+        print(f"Logging failed: {e}")
