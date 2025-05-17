@@ -97,22 +97,13 @@ async def start_handler(bot: Client, message: Message):
 
 
 
-
-
 from pyrogram import Client, filters
-from pyrogram.types import Message
-from pymongo import MongoClient
-from config import MONGO_DB_URI
-from config import Config
-from db import db
+from db import delete_user
 
-@Client.on_message(filters.command("clear") & filters.user(Config.ADMINS))
-async def clear_mongodb(_: Client, msg: Message):
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Confirm Delete", callback_data="confirm_mongclear"),
-        InlineKeyboardButton("❌ Cancel",         callback_data="cancel_mongclear"),
-    ]])
-    await msg.reply(
-        "**⚠️ Are you sure you want to clear MongoDB?**\nThis will delete all bot data permanently!",
-        reply_markup=kb
-    )
+@Client.on_message(filters.command("delete_user") & filters.private)
+async def delete_user_command(client, message):
+    user_id = message.from_user.id
+    if delete_user(user_id):
+        await message.reply_text("তোমার তথ্য সফলভাবে ডিলিট করা হয়েছে।")
+    else:
+        await message.reply_text("তোমার তথ্য খুঁজে পাওয়া যায়নি বা আগেই ডিলিট করা হয়েছে।")
