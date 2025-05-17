@@ -1,5 +1,3 @@
-# ✅ ডাউনলোডার (Pyrogram Bot with yt-dlp, Google Drive, MEGA, Torrent/Magnet support)
-
 import os
 import aiohttp
 import asyncio
@@ -7,14 +5,12 @@ import traceback
 import datetime
 import time
 import yt_dlp
-import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-TORRENT_EXTENSIONS = [".torrent"]
 
 def format_bytes(size):
     power = 1024
@@ -27,6 +23,7 @@ def format_bytes(size):
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
+        import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
@@ -86,21 +83,6 @@ def download_mega_file(url, download_dir="/tmp"):
         "ext": os.path.splitext(file.name)[1].lstrip(".")
     }
 
-def is_torrent_or_magnet(url_or_path):
-    return url_or_path.startswith("magnet:") or url_or_path.endswith(".torrent")
-
-def download_torrent_or_magnet(link, download_dir="/tmp"):
-    output = subprocess.run(
-        ["aria2c", "--dir", download_dir, "--seed-time=0", link],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    for f in os.listdir(download_dir):
-        path = os.path.join(download_dir, f)
-        if os.path.isfile(path):
-            return path, {"title": f, "ext": os.path.splitext(f)[1].lstrip(".")}
-    raise Exception("Download failed or file not found.")
-
 def download_with_ytdlp(url, download_dir="/tmp", message=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -137,7 +119,7 @@ async def auto_download_handler(bot: Client, message: Message):
         await asyncio.sleep(e.value)
         notice = await message.reply_text("Analyzing link(s)...")
 
-    valid_urls = [url for url in urls if url.lower().startswith("http") or url.lower().endswith(".torrent") or url.lower().startswith("magnet:")]  
+    valid_urls = [url for url in urls if url.lower().startswith("http")]  
     if not valid_urls:  
         return await notice.edit("No valid links detected.")  
 
@@ -155,8 +137,6 @@ async def auto_download_handler(bot: Client, message: Message):
             if is_mega_link(url):  
                 filepath, info = await asyncio.to_thread(download_mega_file, url)  
                 filepath = os.path.join("/tmp", filepath)  
-            elif is_torrent_or_magnet(url):  
-                filepath, info = await asyncio.to_thread(download_torrent_or_magnet, url)  
             else:  
                 filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)  
 
@@ -165,9 +145,9 @@ async def auto_download_handler(bot: Client, message: Message):
 
             ext = os.path.splitext(filepath)[1]  
             caption = (  
-                "**This video will be removed in 5 minutes.**\n"
-                "Please save it to your **Saved Messages** to keep it.\n\n"
-                f"**Source:** [Open Link]({url})"
+                "**⚠️ This file will be automatically deleted in 5 minutes!**\n\n"
+                "Please **save this file** by forwarding it to your **Saved Messages** or any private chat.\n\n"
+                f"[Source Link]({url})"
             )  
 
             upload_msg = await processing.edit("Uploading...")  
