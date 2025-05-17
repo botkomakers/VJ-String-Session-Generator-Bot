@@ -7,8 +7,8 @@ import time
 import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
-from config import LOG_CHANNEL, ADMIN_ID
+from pyrogram.errors import FloodWait, UserNotParticipant
+from config import LOG_CHANNEL, ADMIN_ID, ENFORCE_JOIN, REQUIRED_CHANNEL
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 
@@ -122,13 +122,29 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
         filename = ydl.prepare_filename(info)
         return filename, info
 
+async def check_user_joined(bot, user_id):
+    try:
+        member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
+
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
-    if message.from_user.is_bot:
-        return  # Ignore messages from bots
+    if message.from_user.is_bot or message.reply_to_message:
+        return
 
-    if message.reply_to_message:
-        return  # Ignore replies
+    # Check channel join
+    if ENFORCE_JOIN:
+        joined = await check_user_joined(bot, message.from_user.id)
+        if not joined:
+            btn = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Join Channel", url=f"https://t.me/{REQUIRED_CHANNEL}")]
+            ])
+            return await message.reply(
+                "❗️ You must join our channel to use this bot.",
+                reply_markup=btn
+            )
 
     urls = message.text.strip().split()
     try:
