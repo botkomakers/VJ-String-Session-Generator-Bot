@@ -73,6 +73,13 @@ def fix_google_drive_url(url):
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
+def get_cookie_file(url):
+    if "instagram.com" in url:
+        return "cookies/instagram.txt"
+    elif "youtube.com" in url or "youtu.be" in url:
+        return "cookies/youtube.txt"
+    return None
+
 def download_mega_file(url, download_dir="/tmp"):
     from mega import Mega
     mega = Mega()
@@ -83,42 +90,36 @@ def download_mega_file(url, download_dir="/tmp"):
         "ext": os.path.splitext(file.name)[1].lstrip(".")
     }
 
-def get_cookie_file(url):
-    if "instagram.com" in url:
-        return "cookies/instagram.txt"
-    return None
-
 def download_with_ytdlp(url, download_dir="/tmp", message=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    def hook(d):  
-        if d['status'] == 'downloading' and message:  
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")  
-            downloaded = d.get("downloaded_bytes", 0)  
-            if total:  
-                asyncio.run_coroutine_threadsafe(  
-                    progress_callback(downloaded, total, message, "Downloading"),  
-                    loop  
-                )  
+    def hook(d):
+        if d['status'] == 'downloading' and message:
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            if total:
+                asyncio.run_coroutine_threadsafe(
+                    progress_callback(downloaded, total, message, "Downloading"),
+                    loop
+                )
 
-    cookie_file = get_cookie_file(url)
-
-    ydl_opts = {  
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),  
-        "format": "best[ext=mp4]/best",  
-        "quiet": True,  
-        "no_warnings": True,  
-        "noplaylist": True,  
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
         "progress_hooks": [hook]
     }
 
+    cookie_file = get_cookie_file(url)
     if cookie_file and os.path.exists(cookie_file):
         ydl_opts["cookiefile"] = cookie_file
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  
-        info = ydl.extract_info(url, download=True)  
-        filename = ydl.prepare_filename(info)  
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
         return filename, info
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
@@ -130,115 +131,111 @@ async def auto_download_handler(bot: Client, message: Message):
         await asyncio.sleep(e.value)
         notice = await message.reply_text("Analyzing link(s)...")
 
-    valid_urls = [url for url in urls if url.lower().startswith("http")]  
-    if not valid_urls:  
-        return await notice.edit("No valid links detected.")  
+    valid_urls = [url for url in urls if url.lower().startswith("http")]
+    if not valid_urls:
+        return await notice.edit("No valid links detected.")
 
-    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")  
+    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
 
-    for url in valid_urls:  
-        filepath = None  
-        try:  
-            if is_google_drive_link(url):  
-                url = fix_google_drive_url(url)  
+    for url in valid_urls:
+        filepath = None
+        try:
+            if is_google_drive_link(url):
+                url = fix_google_drive_url(url)
 
-            await notice.delete()  
-            processing = await message.reply_text(f"Downloading from:\n{url}", reply_to_message_id=message.id)  
+            await notice.delete()
+            processing = await message.reply_text(f"Downloading from:\n{url}", reply_to_message_id=message.id)
 
-            if is_mega_link(url):  
-                filepath, info = await asyncio.to_thread(download_mega_file, url)  
-                filepath = os.path.join("/tmp", filepath)  
-            else:  
-                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)  
+            if is_mega_link(url):
+                filepath, info = await asyncio.to_thread(download_mega_file, url)
+                filepath = os.path.join("/tmp", filepath)
+            else:
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)
 
-            if not os.path.exists(filepath):  
-                raise Exception("Download failed or file not found.")  
+            if not os.path.exists(filepath):
+                raise Exception("Download failed or file not found.")
 
-            ext = os.path.splitext(filepath)[1]  
-            caption = (  
+            ext = os.path.splitext(filepath)[1]
+            caption = (
                 "**⚠️ This file will be automatically deleted in 5 minutes!**\n\n"
                 "Please **save this file** by forwarding it to your **Saved Messages** or any private chat.\n\n"
                 f"[Source Link]({url})"
-            )  
+            )
 
-            upload_msg = await processing.edit("Uploading...")  
+            upload_msg = await processing.edit("Uploading...")
 
-            thumb = generate_thumbnail(filepath)  
+            thumb = generate_thumbnail(filepath)
 
             buttons = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🔗 Source Link", url=url)
-                ],
-                [
-                    InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")
-                ]
+                [InlineKeyboardButton("🔗 Source Link", url=url)],
+                [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
             ])
 
-            if ext.lower() in VIDEO_EXTENSIONS:  
-                sent = await message.reply_video(  
-                    video=filepath,  
-                    caption=caption,  
-                    thumb=thumb if thumb else None,  
-                    reply_to_message_id=message.id,  
+            if ext.lower() in VIDEO_EXTENSIONS:
+                sent = await message.reply_video(
+                    video=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None,
+                    reply_to_message_id=message.id,
                     supports_streaming=True,
                     reply_markup=buttons
-                )  
-            else:  
-                sent = await message.reply_document(  
-                    document=filepath,  
-                    caption=caption,  
+                )
+            else:
+                sent = await message.reply_document(
+                    document=filepath,
+                    caption=caption,
                     reply_to_message_id=message.id,
                     reply_markup=buttons
-                )  
+                )
 
-            await upload_msg.delete()  
-            asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))  
+            await upload_msg.delete()
+            asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))
 
-            user = message.from_user  
-            file_size = format_bytes(os.path.getsize(filepath))  
-            log_text = (  
-                f"**New Download Event**\n\n"  
-                f"**User:** {user.mention} (`{user.id}`)\n"  
-                f"**Link:** `{url}`\n"  
-                f"**File Name:** `{os.path.basename(filepath)}`\n"  
-                f"**Size:** `{file_size}`\n"  
-                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"  
-                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"  
-            )  
+            user = message.from_user
+            file_size = format_bytes(os.path.getsize(filepath))
+            log_text = (
+                f"**New Download Event**\n\n"
+                f"**User:** {user.mention} (`{user.id}`)\n"
+                f"**Link:** `{url}`\n"
+                f"**File Name:** `{os.path.basename(filepath)}`\n"
+                f"**Size:** `{file_size}`\n"
+                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+            )
 
-            if ext.lower() in VIDEO_EXTENSIONS:  
-                await bot.send_video(  
-                    LOG_CHANNEL,  
-                    video=filepath,  
-                    caption=log_text,  
-                    thumb=thumb if thumb else None,  
-                    supports_streaming=True  
-                )  
-            else:  
-                await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)  
+            if ext.lower() in VIDEO_EXTENSIONS:
+                await bot.send_video(
+                    LOG_CHANNEL,
+                    video=filepath,
+                    caption=log_text,
+                    thumb=thumb if thumb else None,
+                    supports_streaming=True
+                )
+            else:
+                await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
-            if any(x in url.lower() for x in ["porn", "sex", "xxx"]):  
-                alert = (  
-                    f"⚠️ **Porn link detected**\n"  
-                    f"**User:** {user.mention} (`{user.id}`)\n"  
-                    f"**Link:** {url}"  
-                )  
-                await bot.send_message(ADMIN_ID, alert)  
+            if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
+                alert = (
+                    f"⚠️ **Porn link detected**\n"
+                    f"**User:** {user.mention} (`{user.id}`)\n"
+                    f"**Link:** {url}"
+                )
+                await bot.send_message(ADMIN_ID, alert)
 
-        except FloodWait as e:  
-            await asyncio.sleep(e.value)  
-            continue  
-        except Exception as e:  
-            traceback.print_exc()  
-            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")  
-        finally:  
-            try:  
-                if filepath and os.path.exists(filepath):  
-                    os.remove(filepath)  
-                if os.path.exists("/tmp/thumb.jpg"):  
-                    os.remove("/tmp/thumb.jpg")  
-                await auto_cleanup()  
-            except:  
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            continue
+        except Exception as e:
+            traceback.print_exc()
+            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
+        finally:
+            try:
+                if filepath and os.path.exists(filepath):
+                    os.remove(filepath)
+                if os.path.exists("/tmp/thumb.jpg"):
+                    os.remove("/tmp/thumb.jpg")
+                await auto_cleanup()
+            except:
                 pass
 
 async def auto_delete_message(bot, chat_id, message_id, delay):
