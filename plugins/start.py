@@ -103,14 +103,16 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 from config import MONGO_DB_URI
+from config import Config
+from db import db
 
-# MongoDB কানেকশন
-client = MongoClient(MONGO_DB_URI)
-db = client["universal_video_bot"]
-users = db["users"]
-
-# CLEAN কমান্ড: সব ডেটা মুছে ফেলা
-@Client.on_message(filters.command("clean") & filters.user(7862181538))  # শুধু অ্যাডমিন ইউজার আইডি
-async def clean_database(client: Client, message: Message):
-    result = users.delete_many({})
-    await message.reply_text(f"✅ {result.deleted_count} টি ইউজার ডেটা মুছে ফেলা হয়েছে ডেটাবেজ থেকে।")
+@Client.on_message(filters.command("clear") & filters.user(Config.ADMINS))
+async def clear_mongodb(_: Client, msg: Message):
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirm Delete", callback_data="confirm_mongclear"),
+        InlineKeyboardButton("❌ Cancel",         callback_data="cancel_mongclear"),
+    ]])
+    await msg.reply(
+        "**⚠️ Are you sure you want to clear MongoDB?**\nThis will delete all bot data permanently!",
+        reply_markup=kb
+    )
