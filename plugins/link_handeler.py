@@ -5,13 +5,14 @@ import traceback
 import datetime
 import time
 import yt_dlp
+import subprocess
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-DEFAULT_AUDIO_THUMB = "thumbs/audio.jpg"
+DEFAULT_THUMB = "default_audio.jpg"  # Ensure this file exists in working directory
 
 def format_bytes(size):
     power = 1024
@@ -24,7 +25,6 @@ def format_bytes(size):
 
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
-        import subprocess
         subprocess.run(
             ["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
             stdout=subprocess.DEVNULL,
@@ -95,175 +95,149 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    def hook(d):  
-        if d['status'] == 'downloading' and message:  
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")  
-            downloaded = d.get("downloaded_bytes", 0)  
-            if total:  
-                asyncio.run_coroutine_threadsafe(  
-                    progress_callback(downloaded, total, message, "Downloading"),  
-                    loop  
-                )  
+    def hook(d):
+        if d['status'] == 'downloading' and message:
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            downloaded = d.get("downloaded_bytes", 0)
+            if total:
+                asyncio.run_coroutine_threadsafe(
+                    progress_callback(downloaded, total, message, "Downloading"),
+                    loop
+                )
 
-    ydl_opts = {  
-        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),  
-        "format": "bestaudio/best",  
-        "quiet": True,  
-        "no_warnings": True,  
-        "noplaylist": True,  
-        "progress_hooks": [hook]  
-    }  
+    ydl_opts = {
+        "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
+        "format": "best[ext=mp4]/bestaudio/best",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "progress_hooks": [hook]
+    }
 
-    cookie_file = get_cookie_file(url)  
-    if cookie_file and os.path.exists(cookie_file):  
-        ydl_opts["cookiefile"] = cookie_file  
+    cookie_file = get_cookie_file(url)
+    if cookie_file and os.path.exists(cookie_file):
+        ydl_opts["cookiefile"] = cookie_file
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  
-        info = ydl.extract_info(url, download=True)  
-        filename = ydl.prepare_filename(info)  
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
         return filename, info
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
-async def auto_download_handler(bot: Client, message: Message):
-    if message.from_user.is_bot:
+async def handle_download_request(bot: Client, message: Message):
+    if message.from_user.is_bot or message.reply_to_message:
         return
+    urls = [url for url in message.text.strip().split() if url.startswith("http")]
+    if not urls:
+        return await message.reply_text("কোনো বৈধ লিংক পাওয়া যায়নি।")
 
-    if message.reply_to_message:
-        return
+    for url in urls:
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎥 ভিডিও", callback_data=f"video|{url}"),
+             InlineKeyboardButton("🎧 অডিও", callback_data=f"audio|{url}")]
+        ])
+        await message.reply_text("আপনি কী ডাউনলোড করতে চান?", reply_markup=buttons)
 
-    urls = message.text.strip().split()
-    try:
-        notice = await message.reply_text("Analyzing link(s)...")
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        notice = await message.reply_text("Analyzing link(s)...")
-
-    valid_urls = [url for url in urls if url.lower().startswith("http")]
-    if not valid_urls:
-        return await notice.edit("No valid links detected.")
-
-    await notice.edit(f"Found {len(valid_urls)} link(s). Starting download...")
-
-    for url in valid_urls:
-        filepath = None
+@Client.on_callback_query()
+async def handle_choice(bot: Client, query: CallbackQuery):
+    data = query.data
+    if data.startswith("delete_"):
         try:
-            if is_google_drive_link(url):
-                url = fix_google_drive_url(url)
+            await bot.delete_messages(query.message.chat.id, query.message.id)
+            await query.answer("ডিলিট করা হয়েছে।", show_alert=False)
+        except:
+            await query.answer("ডিলিট করা যায়নি।", show_alert=True)
+        return
 
-            await notice.delete()
-            processing = await message.reply_text(f"Downloading from:\n{url}", reply_to_message_id=message.id)
+    try:
+        action, url = data.split("|", 1)
+        await query.answer()
+        msg = await query.message.edit_text(f"{action.capitalize()} ডাউনলোড শুরু হচ্ছে...")
 
-            if is_mega_link(url):
-                filepath, info = await asyncio.to_thread(download_mega_file, url)
-                filepath = os.path.join("/tmp", filepath)
-            else:
-                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)
+        if is_google_drive_link(url):
+            url = fix_google_drive_url(url)
 
-            if not os.path.exists(filepath):
-                raise Exception("Download failed or file not found.")
+        if is_mega_link(url):
+            filepath, info = await asyncio.to_thread(download_mega_file, url)
+            filepath = os.path.join("/tmp", filepath)
+        else:
+            filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", msg)
 
-            ext = os.path.splitext(filepath)[1].lower()
+        if not os.path.exists(filepath):
+            raise Exception("ডাউনলোড ব্যর্থ হয়েছে।")
 
-            thumb = generate_thumbnail(filepath) if ext in VIDEO_EXTENSIONS else DEFAULT_AUDIO_THUMB if os.path.exists(DEFAULT_AUDIO_THUMB) else None
+        ext = os.path.splitext(filepath)[1].lower()
+        caption = (
+            "**⚠️ এই ফাইল ৫ মিনিট পর স্বয়ংক্রিয়ভাবে মুছে যাবে!**\n\n"
+            "ফাইলটি সংরক্ষণ করতে চাইলে এটি আপনার **Saved Messages**-এ ফরোয়ার্ড করুন।\n\n"
+            f"[Source Link]({url})"
+        )
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Source Link", url=url)],
+            [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{query.message.id}")]
+        ])
 
-            caption = (
-                "**⚠️ This file will be automatically deleted in 5 minutes!**\n\n"
-                "Please **save this file** by forwarding it to your **Saved Messages** or any private chat.\n\n"
-                f"[Source Link]({url})"
+        thumb = generate_thumbnail(filepath) or (DEFAULT_THUMB if os.path.exists(DEFAULT_THUMB) else None)
+
+        if action == "audio":
+            audio_path = filepath.rsplit(".", 1)[0] + ".mp3"
+            os.system(f'ffmpeg -i "{filepath}" -vn -ab 128k -ar 44100 -y "{audio_path}"')
+            await query.message.reply_audio(
+                audio=audio_path,
+                caption=caption,
+                thumb=thumb,
+                reply_markup=buttons
             )
-
-            upload_msg = await processing.edit("Uploading...")
-
-            buttons = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Source Link", url=url)],
-                [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
-            ])
-
+            os.remove(audio_path)
+        else:
             if ext in VIDEO_EXTENSIONS:
-                sent = await message.reply_video(
+                await query.message.reply_video(
                     video=filepath,
                     caption=caption,
-                    thumb=thumb if thumb else None,
-                    reply_to_message_id=message.id,
+                    thumb=thumb,
                     supports_streaming=True,
                     reply_markup=buttons
                 )
-            elif ext in [".opus", ".mp3", ".m4a"]:
-                sent = await message.reply_audio(
-                    audio=filepath,
-                    caption=caption,
-                    thumb=thumb if thumb else None,
-                    reply_to_message_id=message.id,
-                    reply_markup=buttons,
-                    title=info.get("title") if info.get("title") else os.path.basename(filepath),
-                    performer=info.get("uploader") if info.get("uploader") else "Unknown"
-                )
             else:
-                sent = await message.reply_document(
+                await query.message.reply_document(
                     document=filepath,
                     caption=caption,
-                    reply_to_message_id=message.id,
                     reply_markup=buttons
                 )
 
-            await upload_msg.delete()
-            asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))
+        await msg.delete()
+        asyncio.create_task(auto_delete_message(bot, query.message.chat.id, query.message.id, 300))
 
-            user = message.from_user
-            file_size = format_bytes(os.path.getsize(filepath))
-            log_text = (
-                f"**New Download Event**\n\n"
-                f"**User:** {user.mention} (`{user.id}`)\n"
-                f"**Link:** `{url}`\n"
-                f"**File Name:** `{os.path.basename(filepath)}`\n"
-                f"**Size:** `{file_size}`\n"
-                f"**Type:** `{'Video' if ext in VIDEO_EXTENSIONS else 'Audio' if ext in ['.opus', '.mp3', '.m4a'] else 'Document'}`\n"
-                f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
-            )
+        user = query.from_user
+        file_size = format_bytes(os.path.getsize(filepath))
+        log_text = (
+            f"**New Download Event**\n\n"
+            f"**User:** {user.mention} (`{user.id}`)\n"
+            f"**Link:** `{url}`\n"
+            f"**File Name:** `{os.path.basename(filepath)}`\n"
+            f"**Size:** `{file_size}`\n"
+            f"**Type:** `{action}`\n"
+            f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+        )
 
-            if ext in VIDEO_EXTENSIONS:
-                await bot.send_video(
-                    LOG_CHANNEL,
-                    video=filepath,
-                    caption=log_text,
-                    thumb=thumb if thumb else None,
-                    supports_streaming=True
-                )
-            elif ext in [".opus", ".mp3", ".m4a"]:
-                await bot.send_audio(
-                    LOG_CHANNEL,
-                    audio=filepath,
-                    caption=log_text,
-                    thumb=thumb if thumb else None,
-                    title=info.get("title") if info.get("title") else os.path.basename(filepath),
-                    performer=info.get("uploader") if info.get("uploader") else "Unknown"
-                )
-            else:
-                await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
+        if action == "video" and ext in VIDEO_EXTENSIONS:
+            await bot.send_video(LOG_CHANNEL, video=filepath, caption=log_text, thumb=thumb, supports_streaming=True)
+        else:
+            await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
-            if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
-                alert = (
-                    f"⚠️ **Porn link detected**\n"
-                    f"**User:** {user.mention} (`{user.id}`)\n"
-                    f"**Link:** {url}"
-                )
-                await bot.send_message(ADMIN_ID, alert)
+        if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
+            alert = f"⚠️ **Porn link detected**\n**User:** {user.mention} (`{user.id}`)\n**Link:** {url}"
+            await bot.send_message(ADMIN_ID, alert)
 
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            continue
-        except Exception as e:
-            traceback.print_exc()
-            await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")
-        finally:
-            try:
-                if filepath and os.path.exists(filepath):
-                    os.remove(filepath)
-                if os.path.exists("/tmp/thumb.jpg"):
-                    os.remove("/tmp/thumb.jpg")
-                await auto_cleanup()
-            except:
-                pass
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        if os.path.exists("/tmp/thumb.jpg"):
+            os.remove("/tmp/thumb.jpg")
+        await auto_cleanup()
+
+    except Exception as e:
+        traceback.print_exc()
+        await query.message.reply_text(f"❌ ডাউনলোডে সমস্যা হয়েছে:\n{e}")
 
 async def auto_delete_message(bot, chat_id, message_id, delay):
     await asyncio.sleep(delay)
@@ -271,13 +245,3 @@ async def auto_delete_message(bot, chat_id, message_id, delay):
         await bot.delete_messages(chat_id, message_id)
     except:
         pass
-
-@Client.on_callback_query()
-async def handle_callback(bot, callback_query):
-    data = callback_query.data
-    if data.startswith("delete_"):
-        try:
-            await bot.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-            await callback_query.answer("Deleted successfully.", show_alert=False)
-        except:
-            await callback_query.answer("Failed to delete message.", show_alert=True)
