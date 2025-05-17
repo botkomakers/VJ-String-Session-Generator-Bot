@@ -18,3 +18,9 @@ def has_been_notified(user_id):
 
 def set_notified(user_id):
     users.update_one({"_id": user_id}, {"$set": {"notified": True}})
+
+
+
+def delete_user(user_id):
+    result = users.delete_one({"_id": user_id})
+    return result.deleted_count > 0
