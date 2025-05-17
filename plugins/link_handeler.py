@@ -13,7 +13,7 @@ from config import LOG_CHANNEL, ADMIN_ID
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]
 
-user_choice = {}
+DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"
 
 def format_bytes(size):
     power = 1024
@@ -124,10 +124,7 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
 
 @Client.on_message(filters.private & filters.text & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
-    if message.from_user.is_bot:
-        return
-
-    if message.reply_to_message:
+    if message.from_user.is_bot or message.reply_to_message:
         return
 
     urls = message.text.strip().split()
@@ -197,6 +194,9 @@ async def start_download(bot, message: Message, url: str, mode: str):
 
         upload_msg = await processing.edit("Uploading...")
         thumb = generate_thumbnail(filepath)
+        if not thumb and ext.lower() in AUDIO_EXTENSIONS:
+            thumb = DEFAULT_THUMB
+
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Source Link", url=url)],
             [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
@@ -206,7 +206,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
             sent = await message.reply_video(
                 video=filepath,
                 caption=caption,
-                thumb=thumb if thumb else None,
+                thumb=thumb if os.path.exists(str(thumb)) else None,
                 reply_to_message_id=message.id,
                 supports_streaming=True,
                 reply_markup=buttons
@@ -215,6 +215,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
             sent = await message.reply_document(
                 document=filepath,
                 caption=caption,
+                thumb=thumb if os.path.exists(str(thumb)) else None,
                 reply_to_message_id=message.id,
                 reply_markup=buttons
             )
@@ -235,7 +236,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
         )
 
         if ext.lower() in VIDEO_EXTENSIONS:
-            await bot.send_video(LOG_CHANNEL, video=filepath, caption=log_text, thumb=thumb if thumb else None, supports_streaming=True)
+            await bot.send_video(LOG_CHANNEL, video=filepath, caption=log_text, thumb=thumb if os.path.exists(str(thumb)) else None, supports_streaming=True)
         else:
             await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
