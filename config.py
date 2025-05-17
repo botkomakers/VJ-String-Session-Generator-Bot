@@ -2,6 +2,16 @@ from os import environ
 import os
 
 
+
+
+
+REQUIRED_CHANNEL = "link_your_channel"  # যেমনঃ "mychannel"
+ENFORCE_JOIN = True  # True মানে চেক চালু, False মানে বন্ধ
+
+
+
+
+
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", -1002589776901))
 
 COOKIE_FILE = "cookies.txt"  # path to cookies file
