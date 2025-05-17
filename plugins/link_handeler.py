@@ -12,8 +12,10 @@ from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
-
 DB_FILE = os.path.join(os.path.dirname(__file__), "download_recovery.db")
+
+# স্টোর করবে user_id: pause_event
+download_pause_events = {}
 
 def init_db():
     try:
@@ -54,16 +56,34 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
         return None
 
 def make_progress_bar(current, total, length=20):
-    percent = current / total if total else 0
+    percent = current / total
     filled_length = int(length * percent)
     bar = '■' * filled_length + '▩' + '□' * (length - filled_length - 1)
     return f"{int(percent * 100)}%\n{bar}"
 
-async def progress_callback(current, total, message: Message, action="Downloading"):
+async def progress_callback(current, total, message: Message, user_id: int, action="Downloading"):
     try:
+        # Pause handling: যদি pause_event clear থাকে, অপেক্ষা করো
+        pause_event = download_pause_events.get(user_id)
+        if pause_event:
+            await pause_event.wait()  # এটা তখন পর্যন্ত অপেক্ষা করবে যতক্ষণ resume না হয়
+
         progress_text = make_progress_bar(current, total)
         text = f"{action}: {progress_text}"
-        await message.edit_text(text, reply_markup=download_control_buttons())
+        # Update message with inline buttons including Pause/Resume button
+        # দেখব pause_event set আছে কি না, বাটন accordingly দিব
+        if pause_event and pause_event.is_set():
+            btn_text = "Pause"
+            btn_data = f"pause|{user_id}"
+        else:
+            btn_text = "Resume"
+            btn_data = f"resume|{user_id}"
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(btn_text, callback_data=btn_data)]
+        ])
+
+        await message.edit_text(text, reply_markup=keyboard)
     except Exception:
         pass
 
@@ -103,19 +123,23 @@ def download_mega_file(url, download_dir="/tmp"):
         "ext": os.path.splitext(file.name)[1].lstrip(".")
     }
 
-def download_with_ytdlp(url, download_dir="/tmp", message=None):
+def download_with_ytdlp(url, download_dir="/tmp", message=None, user_id=None):
+    # event loop for yt-dlp hooks
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     def hook(d):
-        if d['status'] == 'downloading' and message:
+        if d['status'] == 'downloading' and message and user_id:
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             downloaded = d.get("downloaded_bytes", 0)
             if total:
+                # asyncio.run_coroutine_threadsafe(progress_callback(...))
                 asyncio.run_coroutine_threadsafe(
-                    progress_callback(downloaded, total, message, "Downloading"),
+                    progress_callback(downloaded, total, message, user_id, "Downloading"),
                     loop
                 )
+
+            # Pause event check inside hook is handled in progress_callback
 
     ydl_opts = {
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),
@@ -129,25 +153,6 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         return filename, info
-
-# --- Inline Keyboard Buttons ---
-
-def download_control_buttons():
-    buttons = [
-        [
-            InlineKeyboardButton("⏸ Pause", callback_data="pause"),
-            InlineKeyboardButton("▶ Resume", callback_data="resume"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-        ],
-        [
-            InlineKeyboardButton("📤 Forward", callback_data="forward"),
-            InlineKeyboardButton("🗑 Delete", callback_data="delete")
-        ]
-    ]
-    return InlineKeyboardMarkup(buttons)
-
-# Global dictionary to hold active downloads for controlling
-active_downloads = {}
 
 @Client.on_message(filters.private & filters.text & ~filters.command(["start"]))
 async def auto_download_handler(bot: Client, message: Message):
@@ -166,33 +171,29 @@ async def auto_download_handler(bot: Client, message: Message):
 
     for url in valid_urls:
         filepath = None
+        # Create pause event (set=True means downloading)
+        pause_event = asyncio.Event()
+        pause_event.set()
+        user_id = message.from_user.id
+        download_pause_events[user_id] = pause_event
         try:
             if is_google_drive_link(url):
                 url = fix_google_drive_url(url)
 
             await notice.delete()
-            processing = await message.reply_text(f"Downloading from:\n{url}", reply_markup=download_control_buttons())
+            processing = await message.reply_text(f"Downloading from:\n{url}", reply_to_message_id=message.id)
 
             with sqlite3.connect(DB_FILE) as db:
                 db.execute("INSERT INTO downloads (user_id, url, status, filepath, timestamp) VALUES (?, ?, ?, ?, ?)", (
-                    message.from_user.id, url, "downloading", "", datetime.datetime.now().isoformat()
+                    user_id, url, "downloading", "", datetime.datetime.now().isoformat()
                 ))
                 db.commit()
-
-            # Store to control
-            active_downloads[message.from_user.id] = {"url": url, "message": processing, "cancelled": False}
 
             if is_mega_link(url):
                 filepath, info = await asyncio.to_thread(download_mega_file, url)
                 filepath = os.path.join("/tmp", filepath)
             else:
-                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing)
-
-            if active_downloads[message.from_user.id]["cancelled"]:
-                await processing.edit("Download cancelled by user.")
-                if filepath and os.path.exists(filepath):
-                    os.remove(filepath)
-                continue
+                filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing, user_id)
 
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
@@ -205,8 +206,18 @@ async def auto_download_handler(bot: Client, message: Message):
                 f"**Source:** [Click to open]({url})"
             )
 
-            upload_msg = await processing.edit("Uploading...", reply_markup=None)
+            upload_msg = await processing.edit("Uploading...")
+
             thumb = generate_thumbnail(filepath)
+
+            # Inline buttons for final message
+            final_buttons = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Forward", switch_inline_query=filepath),
+                    InlineKeyboardButton("Delete", callback_data=f"delete|{user_id}"),
+                    InlineKeyboardButton("Share", url=url)
+                ]
+            ])
 
             if ext.lower() in VIDEO_EXTENSIONS:
                 sent = await message.reply_video(
@@ -214,13 +225,15 @@ async def auto_download_handler(bot: Client, message: Message):
                     caption=caption,
                     thumb=thumb if thumb else None,
                     reply_to_message_id=message.id,
-                    supports_streaming=True
+                    supports_streaming=True,
+                    reply_markup=final_buttons
                 )
             else:
                 sent = await message.reply_document(
                     document=filepath,
                     caption=caption,
-                    reply_to_message_id=message.id
+                    reply_to_message_id=message.id,
+                    reply_markup=final_buttons
                 )
 
             await upload_msg.delete()
@@ -228,7 +241,7 @@ async def auto_download_handler(bot: Client, message: Message):
 
             with sqlite3.connect(DB_FILE) as db:
                 db.execute("UPDATE downloads SET status = ?, filepath = ? WHERE user_id = ? AND url = ?", (
-                    "done", filepath, message.from_user.id, url
+                    "done", filepath, user_id, url
                 ))
                 db.commit()
 
@@ -249,7 +262,7 @@ async def auto_download_handler(bot: Client, message: Message):
             else:
                 await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
-            # Check for porn-related keywords in URL and alert admin
+            # Porn check
             if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
                 alert = (
                     f"\u26a0\ufe0f **Porn link detected**\n"
@@ -266,65 +279,15 @@ async def auto_download_handler(bot: Client, message: Message):
             await message.reply_text(f"\u274c Failed to download:\n{url}\n\n**{e}**")
         finally:
             try:
+                # Remove pause event for this user after finishing
+                download_pause_events.pop(user_id, None)
                 if filepath and os.path.exists(filepath):
                     os.remove(filepath)
                 if os.path.exists("/tmp/thumb.jpg"):
                     os.remove("/tmp/thumb.jpg")
                 await auto_cleanup()
-                active_downloads.pop(message.from_user.id, None)
             except Exception:
                 pass
-
-# --- Callback query handler for buttons ---
-
-@Client.on_callback_query()
-async def callback_handler(bot: Client, cq: CallbackQuery):
-    user_id = cq.from_user.id
-    data = cq.data
-
-    if user_id not in active_downloads:
-        await cq.answer("No active download found.", show_alert=True)
-        return
-
-    dl = active_downloads[user_id]
-    msg = dl.get("message")
-
-    if data == "cancel":
-        dl["cancelled"] = True
-        if msg:
-            await msg.edit("Download cancelled by user.", reply_markup=None)
-        await cq.answer("Download cancelled.")
-        return
-
-    elif data == "pause":
-        # Pause not supported by yt-dlp, so just notify
-        await cq.answer("Pause feature not supported.", show_alert=True)
-
-    elif data == "resume":
-        # Resume not supported by yt-dlp, so just notify
-        await cq.answer("Resume feature not supported.", show_alert=True)
-
-    elif data == "forward":
-        # Forward the download message to Saved Messages (self)
-        if msg:
-            try:
-                await bot.forward_messages("me", msg.chat.id, msg.id)
-                await cq.answer("Forwarded to Saved Messages.")
-            except Exception:
-                await cq.answer("Failed to forward.", show_alert=True)
-        else:
-            await cq.answer("No message to forward.", show_alert=True)
-
-    elif data == "delete":
-        # Delete the download message
-        if msg:
-            try:
-                await msg.delete()
-                await cq.answer("Message deleted.")
-            except Exception:
-                await cq.answer("Failed to delete message.", show_alert=True)
-        else:
-            await cq.answer("No message to delete.", show_alert=True)
 
 async def auto_delete_message(bot, chat_id, message_id, delay):
     await asyncio.sleep(delay)
@@ -333,16 +296,40 @@ async def auto_delete_message(bot, chat_id, message_id, delay):
     except Exception:
         pass
 
-async def resume_incomplete_downloads(bot: Client):
-    with sqlite3.connect(DB_FILE) as db:
-        cursor = db.execute("SELECT user_id, url FROM downloads WHERE status = 'downloading'")
-        rows = cursor.fetchall()
-    for user_id, url in rows:
+@Client.on_callback_query()
+async def callback_query_handler(bot: Client, query: CallbackQuery):
+    data = query.data
+    user_id = query.from_user.id
+
+    if data.startswith("pause|") and str(user_id) == data.split("|")[1]:
+        pause_event = download_pause_events.get(user_id)
+        if pause_event and pause_event.is_set():
+            pause_event.clear()  # Pause download
+            await query.answer("Download paused.")
+            # Update button to Resume
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Resume", callback_data=f"resume|{user_id}")]
+            ])
+            await query.message.edit_reply_markup(reply_markup=keyboard)
+
+    elif data.startswith("resume|") and str(user_id) == data.split("|")[1]:
+        pause_event = download_pause_events.get(user_id)
+        if pause_event and not pause_event.is_set():
+            pause_event.set()  # Resume download
+            await query.answer("Download resumed.")
+            # Update button to Pause
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Pause", callback_data=f"pause|{user_id}")]
+            ])
+            await query.message.edit_reply_markup(reply_markup=keyboard)
+
+    elif data.startswith("delete|") and str(user_id) == data.split("|")[1]:
+        # Delete the message with the video/document
         try:
-            dummy = await bot.send_message(user_id, f"Bot restarted. Resuming previous download:\n{url}")
-            await auto_download_handler(bot, dummy)
+            await query.message.delete()
+            await query.answer("Deleted successfully.")
         except Exception:
-            pass
+            await query.answer("Can't delete message.")
 
 @Client.on_message(filters.command("start") & filters.private)
 async def start_handler(bot: Client, message: Message):
@@ -351,3 +338,14 @@ async def start_handler(bot: Client, message: Message):
 @Client.on_message(filters.command("resume") & filters.user(ADMIN_ID))
 async def resume_command(bot: Client, message: Message):
     await resume_incomplete_downloads(bot)
+
+async def resume_incomplete_downloads(bot: Client):
+    with sqlite3.connect(DB_FILE) as db:
+        cursor = db.execute("SELECT user_id, url FROM downloads WHERE status = 'downloading'")
+        rows = cursor.fetchall()
+        for user_id, url in rows:
+            try:
+                dummy = await bot.send_message(user_id, f"Bot restarted. Resuming previous download:\n{url}")
+                await auto_download_handler(bot, dummy)
+            except Exception:
+                pass
