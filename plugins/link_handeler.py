@@ -186,6 +186,16 @@ async def auto_download_handler(bot: Client, message: Message):
                     supports_streaming=True,
                     reply_markup=buttons
                 )
+            elif ext.lower() in [".opus", ".mp3", ".m4a"]:
+                sent = await message.reply_audio(
+                    audio=filepath,
+                    caption=caption,
+                    thumb=thumb if thumb else None,
+                    reply_to_message_id=message.id,
+                    reply_markup=buttons,
+                    title=info.get("title") if info.get("title") else os.path.basename(filepath),
+                    performer=info.get("uploader") if info.get("uploader") else "Unknown"
+                )
             else:
                 sent = await message.reply_document(
                     document=filepath,
