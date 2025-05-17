@@ -11,6 +11,7 @@ from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
+DEFAULT_AUDIO_THUMB = "thumbs/audio.jpg"
 
 def format_bytes(size):
     power = 1024
@@ -106,7 +107,7 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None):
 
     ydl_opts = {  
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),  
-        "format": "best[ext=mp4]/best",  
+        "format": "bestaudio/best",  
         "quiet": True,  
         "no_warnings": True,  
         "noplaylist": True,  
@@ -161,7 +162,10 @@ async def auto_download_handler(bot: Client, message: Message):
             if not os.path.exists(filepath):
                 raise Exception("Download failed or file not found.")
 
-            ext = os.path.splitext(filepath)[1]
+            ext = os.path.splitext(filepath)[1].lower()
+
+            thumb = generate_thumbnail(filepath) if ext in VIDEO_EXTENSIONS else DEFAULT_AUDIO_THUMB if os.path.exists(DEFAULT_AUDIO_THUMB) else None
+
             caption = (
                 "**⚠️ This file will be automatically deleted in 5 minutes!**\n\n"
                 "Please **save this file** by forwarding it to your **Saved Messages** or any private chat.\n\n"
@@ -170,14 +174,12 @@ async def auto_download_handler(bot: Client, message: Message):
 
             upload_msg = await processing.edit("Uploading...")
 
-            thumb = generate_thumbnail(filepath)
-
             buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔗 Source Link", url=url)],
                 [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
             ])
 
-            if ext.lower() in VIDEO_EXTENSIONS:
+            if ext in VIDEO_EXTENSIONS:
                 sent = await message.reply_video(
                     video=filepath,
                     caption=caption,
@@ -186,7 +188,7 @@ async def auto_download_handler(bot: Client, message: Message):
                     supports_streaming=True,
                     reply_markup=buttons
                 )
-            elif ext.lower() in [".opus", ".mp3", ".m4a"]:
+            elif ext in [".opus", ".mp3", ".m4a"]:
                 sent = await message.reply_audio(
                     audio=filepath,
                     caption=caption,
@@ -215,17 +217,26 @@ async def auto_download_handler(bot: Client, message: Message):
                 f"**Link:** `{url}`\n"
                 f"**File Name:** `{os.path.basename(filepath)}`\n"
                 f"**Size:** `{file_size}`\n"
-                f"**Type:** `{'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}`\n"
+                f"**Type:** `{'Video' if ext in VIDEO_EXTENSIONS else 'Audio' if ext in ['.opus', '.mp3', '.m4a'] else 'Document'}`\n"
                 f"**Time:** `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
             )
 
-            if ext.lower() in VIDEO_EXTENSIONS:
+            if ext in VIDEO_EXTENSIONS:
                 await bot.send_video(
                     LOG_CHANNEL,
                     video=filepath,
                     caption=log_text,
                     thumb=thumb if thumb else None,
                     supports_streaming=True
+                )
+            elif ext in [".opus", ".mp3", ".m4a"]:
+                await bot.send_audio(
+                    LOG_CHANNEL,
+                    audio=filepath,
+                    caption=log_text,
+                    thumb=thumb if thumb else None,
+                    title=info.get("title") if info.get("title") else os.path.basename(filepath),
+                    performer=info.get("uploader") if info.get("uploader") else "Unknown"
                 )
             else:
                 await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
