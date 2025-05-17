@@ -93,3 +93,40 @@ async def start_handler(bot: Client, message: Message):
             [InlineKeyboardButton("Updates", url="https://t.me/your_update_channel")]
         ])
     )
+
+
+
+
+
+
+from pymongo import MongoClient
+from config import MONGO_DB_URI
+from pyrogram import Client, filters
+from pyrogram.types import Message
+
+client = MongoClient(MONGO_DB_URI)
+db = client["universal_video_bot"]
+users = db["users"]
+
+# ইউজার সেভ করার ফাংশন
+def save_user(user_id, name, username):
+    users.update_one(
+        {"_id": user_id},
+        {"$set": {"name": name, "username": username}},
+        upsert=True
+    )
+
+# নোটিফাই চেক করার ফাংশন
+def has_been_notified(user_id):
+    user = users.find_one({"_id": user_id})
+    return user and user.get("notified", False)
+
+# ইউজারকে নোটিফাইড হিসেবে সেট করার ফাংশন
+def set_notified(user_id):
+    users.update_one({"_id": user_id}, {"$set": {"notified": True}})
+
+# CLEAN কমান্ড: সব ডেটা মুছে ফেলা
+@Client.on_message(filters.command("clean") & filters.user(7862181538))
+async def clean_database(client: Client, message: Message):
+    result = users.delete_many({})
+    await message.reply_text(f"✅ {result.deleted_count} জন ইউজার ডাটাবেজ থেকে মুছে ফেলা হয়েছে।")
