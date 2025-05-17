@@ -12,6 +12,7 @@ from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]
+
 user_choice = {}
 
 def format_bytes(size):
@@ -26,8 +27,9 @@ def format_bytes(size):
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     try:
         import subprocess
-        subprocess.run(["ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([
+            "ffmpeg", "-i", file_path, "-ss", "00:00:01.000", "-vframes", "1", output_thumb
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return output_thumb if os.path.exists(output_thumb) else None
     except:
         return None
@@ -122,30 +124,32 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
 
 @Client.on_message(filters.private & filters.text & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
-    if message.from_user.is_bot or message.reply_to_message:
+    if message.from_user.is_bot:
+        return
+
+    if message.reply_to_message:
         return
 
     urls = message.text.strip().split()
     valid_urls = [url for url in urls if url.lower().startswith("http")]
     if not valid_urls:
-        return await message.reply("❌ Valid link detect করা যায়নি।")
+        return await message.reply("No valid links detected.")
 
     url = valid_urls[0]
 
-    if not url.lower().startswith(("http://", "https://")):
-        return await message.reply("❌ Invalid URL!")
+    if is_mega_link(url) or is_google_drive_link(url):
+        await start_download(bot, message, url, "video")
+        return
 
-    ext = os.path.splitext(url.split("?")[0])[1].lower()
-    if ext in AUDIO_EXTENSIONS:
-        return await start_download(bot, message, url, 'audio')
-    elif ext in VIDEO_EXTENSIONS:
-        return await start_download(bot, message, url, 'video')
+    if any(url.lower().endswith(ext) for ext in AUDIO_EXTENSIONS):
+        await start_download(bot, message, url, "audio")
+        return
 
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 ভিডিও", callback_data=f"video|{message.id}"),
-         InlineKeyboardButton("🎵 অডিও", callback_data=f"audio|{message.id}")]
+        [InlineKeyboardButton("Video", callback_data=f"video|{message.id}"),
+         InlineKeyboardButton("Audio", callback_data=f"audio|{message.id}")]
     ])
-    await message.reply("কোন ফরম্যাটে ডাউনলোড করতে চান?", reply_markup=buttons)
+    await message.reply("Do you want to download as Video or Audio?", reply_markup=buttons)
 
 @Client.on_callback_query()
 async def handle_callback(bot: Client, cb: CallbackQuery):
@@ -153,9 +157,9 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
     if data.startswith("delete_"):
         try:
             await bot.delete_messages(cb.message.chat.id, cb.message.id)
-            await cb.answer("❌ ডিলিট হয়েছে।", show_alert=False)
+            await cb.answer("Deleted successfully.", show_alert=False)
         except:
-            await cb.answer("⚠️ ডিলিট ব্যর্থ হয়েছে।", show_alert=True)
+            await cb.answer("Failed to delete message.", show_alert=True)
         return
 
     if "|" in data:
@@ -170,7 +174,7 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
 async def start_download(bot, message: Message, url: str, mode: str):
     filepath = None
     try:
-        processing = await message.reply(f"⬇️ {mode.title()} ডাউনলোড শুরু হচ্ছে:\n{url}", reply_to_message_id=message.id)
+        processing = await message.reply(f"Downloading {mode.title()} from:\n{url}", reply_to_message_id=message.id)
 
         if is_google_drive_link(url):
             url = fix_google_drive_url(url)
@@ -182,20 +186,20 @@ async def start_download(bot, message: Message, url: str, mode: str):
             filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing, audio_only=(mode == 'audio'))
 
         if not os.path.exists(filepath):
-            raise Exception("ডাউনলোড ব্যর্থ হয়েছে।")
+            raise Exception("Download failed or file not found.")
 
         ext = os.path.splitext(filepath)[1]
         caption = (
-            "⚠️ এই ফাইল ৫ মিনিট পর স্বয়ংক্রিয়ভাবে ডিলিট হবে!\n\n"
-            "ফাইলটি সংরক্ষণ করতে আপনার সেভড মেসেজে ফরোয়ার্ড করুন।\n\n"
-            f"Source: {url}"
+            "⚠️ This file will be automatically deleted in 5 minutes!\n\n"
+            "Please save this file by forwarding it to your Saved Messages or any private chat.\n\n"
+            f"Source Link"
         )
 
-        upload_msg = await processing.edit("📤 আপলোড হচ্ছে...")
+        upload_msg = await processing.edit("Uploading...")
         thumb = generate_thumbnail(filepath)
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Source", url=url)],
-            [InlineKeyboardButton("❌ ডিলিট করুন", callback_data=f"delete_{message.id}")]
+            [InlineKeyboardButton("🔗 Source Link", url=url)],
+            [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
         ])
 
         if ext.lower() in VIDEO_EXTENSIONS:
@@ -221,12 +225,13 @@ async def start_download(bot, message: Message, url: str, mode: str):
         user = message.from_user
         file_size = format_bytes(os.path.getsize(filepath))
         log_text = (
-            f"📥 New Download\n\n"
-            f"👤 User: {user.mention} ({user.id})\n"
-            f"🔗 Link: {url}\n"
-            f"📁 File: {os.path.basename(filepath)}\n"
-            f"📦 Size: {file_size}\n"
-            f"🕒 Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"New Download Event\n\n"
+            f"User: {user.mention} ({user.id})\n"
+            f"Link: {url}\n"
+            f"File Name: {os.path.basename(filepath)}\n"
+            f"Size: {file_size}\n"
+            f"Type: {'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}\n"
+            f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
         if ext.lower() in VIDEO_EXTENSIONS:
@@ -237,8 +242,8 @@ async def start_download(bot, message: Message, url: str, mode: str):
         if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
             alert = (
                 f"⚠️ Porn link detected\n"
-                f"👤 User: {user.mention} ({user.id})\n"
-                f"🔗 Link: {url}"
+                f"User: {user.mention} ({user.id})\n"
+                f"Link: {url}"
             )
             await bot.send_message(ADMIN_ID, alert)
 
