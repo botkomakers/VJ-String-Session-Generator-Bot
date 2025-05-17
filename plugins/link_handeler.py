@@ -1,5 +1,3 @@
-# downloader.py
-
 import os
 import aiohttp
 import asyncio
@@ -75,6 +73,9 @@ def fix_google_drive_url(url):
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
+def is_torrent_or_magnet(url):
+    return url.startswith("magnet:") or url.endswith(".torrent")
+
 def get_cookie_file(url):
     if "instagram.com" in url:
         return "cookies/instagram.txt"
@@ -148,8 +149,11 @@ async def handle_link(bot: Client, message: Message):
     if message.from_user.is_bot or message.reply_to_message:
         return
 
+    if not message.text:
+        return
+
     urls = message.text.strip().split()
-    valid_urls = [url for url in urls if url.lower().startswith("http")]
+    valid_urls = [url for url in urls if url.lower().startswith("http") or url.lower().startswith("magnet:") or url.lower().endswith(".torrent")]
     if not valid_urls:
         return await message.reply("No valid links detected.")
 
@@ -200,6 +204,9 @@ async def start_download(bot, message: Message, url: str, mode: str):
         if is_mega_link(url):
             filepath, info = await asyncio.to_thread(download_mega_file, url)
             filepath = os.path.join("/tmp", filepath)
+        elif is_torrent_or_magnet(url):
+            await processing.edit("Torrent and magnet link support coming soon.")
+            return
         else:
             filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing, audio_only=(mode == 'audio'))
 
