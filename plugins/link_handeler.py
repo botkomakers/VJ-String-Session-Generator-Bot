@@ -237,3 +237,27 @@ async def auto_delete_message(bot, chat_id, message_id, delay):
         await bot.delete_messages(chat_id, message_id)
     except:
         pass
+
+
+
+
+@Client.on_message(filters.command("add_premium") & filters.user(ADMIN_ID))
+async def add_premium_user(bot, message):
+    if len(message.command) < 2:
+        return await message.reply("Usage: /add_premium <user_id>")
+    user_id = int(message.command[1])
+    add_premium(user_id)
+    await message.reply(f"✅ Added {user_id} as Premium.")
+
+@Client.on_message(filters.command("remove_premium") & filters.user(ADMIN_ID))
+async def remove_premium_user(bot, message):
+    if len(message.command) < 2:
+        return await message.reply("Usage: /remove_premium <user_id>")
+    user_id = int(message.command[1])
+    remove_premium(user_id)
+    await message.reply(f"❌ Removed {user_id} from Premium.")
+
+@Client.on_message(filters.command("premium_list") & filters.user(ADMIN_ID))
+async def list_premium(bot, message):
+    users = list_premium_users()
+    await message.reply("👑 Premium Users:\n" + "\n".join([str(u) for u in users]) or "No premium users.")
