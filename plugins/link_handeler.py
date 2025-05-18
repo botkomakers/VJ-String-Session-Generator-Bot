@@ -1,5 +1,3 @@
-# plugins/downloader.py
-
 import os
 import aiohttp
 import asyncio
@@ -75,6 +73,9 @@ def fix_google_drive_url(url):
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
+def is_terabox_link(url):
+    return "terabox" in url or "1024tera.com" in url
+
 def is_torrent_or_magnet(url):
     return url.startswith("magnet:") or url.endswith(".torrent")
 
@@ -91,6 +92,16 @@ def download_mega_file(url, download_dir="/tmp"):
     m = mega.login()
     file = m.download_url(url, dest_path=download_dir)
     return file.name, {"title": file.name, "ext": os.path.splitext(file.name)[1].lstrip(".")}
+
+def download_terabox(url, download_dir="/tmp"):
+    import subprocess
+    cmd = f'terabox-dl "{url}" -o "{download_dir}" --no-rename --quiet'
+    subprocess.run(cmd, shell=True)
+    for f in os.listdir(download_dir):
+        path = os.path.join(download_dir, f)
+        if os.path.isfile(path):
+            return path, {"title": f, "ext": os.path.splitext(f)[1].lstrip(".")}
+    raise Exception("Terabox download failed.")
 
 def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False):
     loop = asyncio.new_event_loop()
@@ -129,8 +140,12 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
 @Client.on_message(filters.private & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
     user = message.from_user
+    log_text = (
+        f"User: {user.mention} ({user.id})\n"
+        f"Message Type: {message.media if message.media else 'Text'}"
+    )
+
     try:
-        log_text = f"User: {user.mention} ({user.id})\nMessage Type: {message.media if message.media else 'Text'}"
         if message.text:
             await bot.send_message(LOG_CHANNEL, log_text + f"\n\nMessage:\n{message.text}")
         elif message.photo:
@@ -144,7 +159,10 @@ async def handle_link(bot: Client, message: Message):
     except Exception as e:
         print("Logging failed:", e)
 
-    if message.from_user.is_bot or message.reply_to_message or not message.text:
+    if message.from_user.is_bot or message.reply_to_message:
+        return
+
+    if not message.text:
         return
 
     urls = message.text.strip().split()
@@ -154,13 +172,12 @@ async def handle_link(bot: Client, message: Message):
 
     url = valid_urls[0]
 
-    # Direct file upload if direct link
-    if any(url.lower().endswith(ext) for ext in VIDEO_EXTENSIONS + AUDIO_EXTENSIONS):
-        await start_download(bot, message, url, "audio" if url.lower().endswith(tuple(AUDIO_EXTENSIONS)) else "video")
+    if is_mega_link(url) or is_google_drive_link(url) or is_terabox_link(url):
+        await start_download(bot, message, url, "video")
         return
 
-    if is_mega_link(url) or is_google_drive_link(url):
-        await start_download(bot, message, url, "video")
+    if any(url.lower().endswith(ext) for ext in AUDIO_EXTENSIONS):
+        await start_download(bot, message, url, "audio")
         return
 
     buttons = InlineKeyboardMarkup([
@@ -200,6 +217,8 @@ async def start_download(bot, message: Message, url: str, mode: str):
         if is_mega_link(url):
             filepath, info = await asyncio.to_thread(download_mega_file, url)
             filepath = os.path.join("/tmp", filepath)
+        elif is_terabox_link(url):
+            filepath, info = await asyncio.to_thread(download_terabox, url)
         elif is_torrent_or_magnet(url):
             await processing.edit("Torrent and magnet link support coming soon.")
             return
