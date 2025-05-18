@@ -45,3 +45,26 @@ def is_premium(user_id: int) -> bool:
 
 def list_premium_users():
     return [doc["_id"] for doc in premium_col.find()]
+
+
+from config import MONGO_DB_URI
+from motor.motor_asyncio import AsyncIOMotorClient
+
+client = AsyncIOMotorClient(MONGO_DB_URI)
+db = client["downloader-bot"]
+premium_col = db["premium_users"]
+
+async def add_premium(user_id: int):
+    await premium_col.update_one({"_id": user_id}, {"$set": {"_id": user_id}}, upsert=True)
+
+async def remove_premium(user_id: int):
+    await premium_col.delete_one({"_id": user_id})
+
+async def is_premium(user_id: int) -> bool:
+    return await premium_col.find_one({"_id": user_id}) is not None
+
+async def list_premium() -> list:
+    return [doc["_id"] async for doc in premium_col.find()]
+
+async def get_all_premium() -> list:
+    return await premium_col.distinct("_id")
