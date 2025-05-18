@@ -9,11 +9,15 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery  
 from pyrogram.errors import FloodWait  
 from config import LOG_CHANNEL, ADMIN_ID  
-  
+from collections import deque  
+
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]  
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]  
 DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"  
-  
+
+download_queue = deque()  
+is_downloading = False  
+
 def format_bytes(size):  
     power = 1024  
     n = 0  
@@ -22,7 +26,7 @@ def format_bytes(size):
         size /= power  
         n += 1  
     return f"{size:.2f} {units[n]}"  
-  
+
 def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):  
     try:  
         import subprocess  
@@ -30,13 +34,13 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
         return output_thumb if os.path.exists(output_thumb) else None  
     except:  
         return None  
-  
+
 def make_progress_bar(current, total, length=20):  
     percent = current / total  
     filled_length = int(length * percent)  
     bar = '■' * filled_length + '▩' + '□' * (length - filled_length - 1)  
     return f"{int(percent * 100)}%\n{bar}"  
-  
+
 async def progress_callback(current, total, message: Message, action="Downloading"):  
     try:  
         progress_text = make_progress_bar(current, total)  
@@ -44,7 +48,7 @@ async def progress_callback(current, total, message: Message, action="Downloadin
         await message.edit_text(text)  
     except:  
         pass  
-  
+
 async def auto_cleanup(path="/tmp", max_age=300):  
     now = time.time()  
     for filename in os.listdir(path):  
@@ -56,10 +60,10 @@ async def auto_cleanup(path="/tmp", max_age=300):
                     os.remove(file_path)  
                 except:  
                     pass  
-  
+
 def is_google_drive_link(url):  
     return "drive.google.com" in url  
-  
+
 def fix_google_drive_url(url):  
     if "uc?id=" in url or "export=download" in url:  
         return url  
@@ -67,38 +71,38 @@ def fix_google_drive_url(url):
         file_id = url.split("/file/d/")[1].split("/")[0]  
         return f"https://drive.google.com/uc?id={file_id}&export=download"  
     return url  
-  
+
 def is_mega_link(url):  
     return "mega.nz" in url or "mega.co.nz" in url  
-  
+
 def is_torrent_or_magnet(url):  
     return url.startswith("magnet:") or url.endswith(".torrent")  
-  
+
 def get_cookie_file(url):  
     if "instagram.com" in url:  
         return "cookies/instagram.txt"  
     elif "youtube.com" in url or "youtu.be" in url:  
         return "cookies/youtube.txt"  
     return None  
-  
+
 def download_mega_file(url, download_dir="/tmp"):  
     from mega import Mega  
     mega = Mega()  
     m = mega.login()  
     file = m.download_url(url, dest_path=download_dir)  
     return file.name, {"title": file.name, "ext": os.path.splitext(file.name)[1].lstrip(".")}  
-  
+
 def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False):  
     loop = asyncio.new_event_loop()  
     asyncio.set_event_loop(loop)  
-  
+
     def hook(d):  
         if d['status'] == 'downloading' and message:  
             total = d.get("total_bytes") or d.get("total_bytes_estimate")  
             downloaded = d.get("downloaded_bytes", 0)  
             if total:  
                 asyncio.run_coroutine_threadsafe(progress_callback(downloaded, total, message, "Downloading"), loop)  
-  
+
     ydl_opts = {  
         "outtmpl": os.path.join(download_dir, "%(title)s.%(ext)s"),  
         "format": "bestaudio/best" if audio_only else "best[ext=mp4]/best",  
@@ -107,11 +111,11 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
         "noplaylist": True,  
         "progress_hooks": [hook]  
     }  
-  
+
     cookie_file = get_cookie_file(url)  
     if cookie_file and os.path.exists(cookie_file):  
         ydl_opts["cookiefile"] = cookie_file  
-  
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:  
         info = ydl.extract_info(url, download=True)  
         filename = ydl.prepare_filename(info)  
@@ -121,53 +125,32 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
             os.remove(filename)  
             filename = audio_file  
         return filename, info  
-  
+
 @Client.on_message(filters.private & ~filters.command("start"))  
 async def handle_link(bot: Client, message: Message):  
     user = message.from_user  
-    log_text = f"User: {user.mention} ({user.id})\nMessage Type: {message.media if message.media else 'Text'}"  
-  
-    try:  
-        if message.text:  
-            await bot.send_message(LOG_CHANNEL, log_text + f"\n\nMessage:\n{message.text}")  
-        elif message.photo:  
-            await bot.send_photo(LOG_CHANNEL, photo=message.photo.file_id, caption=log_text)  
-        elif message.video:  
-            await bot.send_video(LOG_CHANNEL, video=message.video.file_id, caption=log_text)  
-        elif message.document:  
-            await bot.send_document(LOG_CHANNEL, document=message.document.file_id, caption=log_text)  
-        elif message.audio:  
-            await bot.send_audio(LOG_CHANNEL, audio=message.audio.file_id, caption=log_text)  
-    except Exception as e:  
-        print("Logging failed:", e)  
-  
-    if message.from_user.is_bot or message.reply_to_message:  
+    if message.from_user.is_bot or message.reply_to_message or not message.text:  
         return  
-  
-    if not message.text:  
-        return  
-  
+
     urls = message.text.strip().split()  
     valid_urls = [url for url in urls if url.lower().startswith("http") or url.lower().startswith("magnet:") or url.lower().endswith(".torrent")]  
     if not valid_urls:  
         return await message.reply("No valid links detected.")  
-  
+
     url = valid_urls[0]  
-  
+
     if is_mega_link(url) or is_google_drive_link(url):  
-        await start_download(bot, message, url, "video")  
-        return  
-  
+        return await queue_download(bot, message, url, "video")  
+
     if any(url.lower().endswith(ext) for ext in AUDIO_EXTENSIONS):  
-        await start_download(bot, message, url, "audio")  
-        return  
-  
+        return await queue_download(bot, message, url, "audio")  
+
     buttons = InlineKeyboardMarkup([  
         [InlineKeyboardButton("Video", callback_data=f"video|{message.id}"),  
          InlineKeyboardButton("Audio", callback_data=f"audio|{message.id}")]  
     ])  
     await message.reply("Do you want to download as Video or Audio?", reply_markup=buttons)  
-  
+
 @Client.on_callback_query()  
 async def handle_callback(bot: Client, cb: CallbackQuery):  
     data = cb.data  
@@ -178,7 +161,7 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
         except:  
             await cb.answer("Failed to delete message.", show_alert=True)  
         return  
-  
+
     if "|" in data:  
         mode, msg_id = data.split("|")  
         msg_id = int(msg_id)  
@@ -186,16 +169,30 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
         if message:  
             url = [u for u in message.text.strip().split() if u.startswith("http") or u.startswith("magnet:") or u.endswith(".torrent")][0]  
             await cb.message.delete()  
-            await start_download(bot, message, url, mode)  
-  
+            await queue_download(bot, message, url, mode)  
+
+async def queue_download(bot, message, url, mode):  
+    global is_downloading  
+    download_queue.append((bot, message, url, mode))  
+    position = len(download_queue)  
+    if position > 1:  
+        await message.reply(f"Queued for download. Queue position: {position}")  
+
+    if not is_downloading:  
+        while download_queue:  
+            is_downloading = True  
+            bot_, msg_, url_, mode_ = download_queue.popleft()  
+            await start_download(bot_, msg_, url_, mode_)  
+        is_downloading = False  
+
 async def start_download(bot, message: Message, url: str, mode: str):  
     filepath = None  
     try:  
         processing = await message.reply(f"Downloading {mode.title()} from:\n{url}", reply_to_message_id=message.id)  
-  
+
         if is_google_drive_link(url):  
             url = fix_google_drive_url(url)  
-  
+
         if is_mega_link(url):  
             filepath, info = await asyncio.to_thread(download_mega_file, url)  
             filepath = os.path.join("/tmp", filepath)  
@@ -204,27 +201,27 @@ async def start_download(bot, message: Message, url: str, mode: str):
             return  
         else:  
             filepath, info = await asyncio.to_thread(download_with_ytdlp, url, "/tmp", processing, audio_only=(mode == 'audio'))  
-  
+
         if not os.path.exists(filepath):  
             raise Exception("Download failed or file not found.")  
-  
+
         ext = os.path.splitext(filepath)[1]  
         caption = (  
             "⚠️ This file will be automatically deleted in 5 minutes!\n\n"  
             "Please save this file by forwarding it to your Saved Messages or any private chat.\n\n"  
             f"Source Link"  
         )  
-  
+
         upload_msg = await processing.edit("Uploading...")  
         thumb = generate_thumbnail(filepath)  
         if not thumb and ext.lower() in AUDIO_EXTENSIONS:  
             thumb = DEFAULT_THUMB  
-  
+
         buttons = InlineKeyboardMarkup([  
             [InlineKeyboardButton("🔗 Source Link", url=url)],  
             [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]  
         ])  
-  
+
         if ext.lower() in VIDEO_EXTENSIONS:  
             sent = await message.reply_video(  
                 video=filepath,  
@@ -242,10 +239,10 @@ async def start_download(bot, message: Message, url: str, mode: str):
                 reply_to_message_id=message.id,  
                 reply_markup=buttons  
             )  
-  
+
         await upload_msg.delete()  
         asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))  
-  
+
         user = message.from_user  
         file_size = format_bytes(os.path.getsize(filepath))  
         log_text = (  
@@ -257,16 +254,16 @@ async def start_download(bot, message: Message, url: str, mode: str):
             f"Type: {'Video' if ext.lower() in VIDEO_EXTENSIONS else 'Document'}\n"  
             f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"  
         )  
-  
+
         if ext.lower() in VIDEO_EXTENSIONS:  
             await bot.send_video(LOG_CHANNEL, video=filepath, caption=log_text, thumb=thumb if os.path.exists(str(thumb)) else None, supports_streaming=True)  
         else:  
             await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)  
-  
+
         if any(x in url.lower() for x in ["porn", "sex", "xxx"]):  
             alert = f"⚠️ Porn link detected\nUser: {user.mention} ({user.id})\nLink: {url}"  
             await bot.send_message(ADMIN_ID, alert)  
-  
+
     except Exception as e:  
         traceback.print_exc()  
         await message.reply_text(f"❌ Failed to download:\n{url}\n\n**{e}**")  
@@ -279,7 +276,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
             await auto_cleanup()  
         except:  
             pass  
-  
+
 async def auto_delete_message(bot, chat_id, message_id, delay):  
     await asyncio.sleep(delay)  
     try:  
