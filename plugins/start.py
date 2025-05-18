@@ -107,3 +107,55 @@ async def delete_user_command(client, message):
         await message.reply_text("তোমার তথ্য সফলভাবে ডিলিট করা হয়েছে।")
     else:
         await message.reply_text("তোমার তথ্য খুঁজে পাওয়া যায়নি বা আগেই ডিলিট করা হয়েছে।")
+
+
+
+
+
+
+
+
+
+
+
+
+
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from db import add_premium, remove_premium, get_all_premium
+ADMIN_ID = 7862181538  # তোমার টেলিগ্রাম ID এখানে দাও
+
+@Client.on_message(filters.command("add_premium") & filters.user(ADMIN_ID))
+async def add_premium_cmd(client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply("Usage: /add_premium user_id")
+
+    try:
+        user_id = int(message.command[1])
+        add_premium(user_id)
+        users = get_all_premium()
+        await message.reply(f"✅ Added `{user_id}` as Premium.\nTotal Premiums: {len(users)}")
+    except Exception as e:
+        await message.reply(f"Error: {e}")
+
+@Client.on_message(filters.command("remove_premium") & filters.user(ADMIN_ID))
+async def remove_premium_cmd(client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply("Usage: /remove_premium user_id")
+
+    try:
+        user_id = int(message.command[1])
+        remove_premium(user_id)
+        users = get_all_premium()
+        await message.reply(f"❌ Removed `{user_id}` from Premium.\nTotal Premiums: {len(users)}")
+    except Exception as e:
+        await message.reply(f"Error: {e}")
+
+@Client.on_message(filters.command("premium_list") & filters.user(ADMIN_ID))
+async def premium_list_cmd(client, message: Message):
+    users = get_all_premium()
+    if not users:
+        return await message.reply("No Premium Users Found.")
+    
+    text = "\n".join([f"- `{u}`" for u in users])
+    await message.reply(f"**Total Premium Users: {len(users)}**\n{text}")
