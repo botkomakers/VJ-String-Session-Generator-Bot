@@ -19,3 +19,6 @@ COPY . .
 
 # Start gunicorn + python script
 CMD gunicorn app:app & python3 main.py
+
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install git+https://github.com/bipinkrish/terabox-dl.git
