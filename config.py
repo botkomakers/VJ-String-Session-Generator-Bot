@@ -9,7 +9,7 @@ REQUIRED_CHANNEL = "link_your_channel"  # যেমনঃ "mychannel"
 ENFORCE_JOIN = True  # True মানে চেক চালু, False মানে বন্ধ
 
 
-
+MONGO_URI = "mongodb+srv://siamkfah48:siamkfah48@cluster0.fbodc0r.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 
 
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", -1002589776901))
