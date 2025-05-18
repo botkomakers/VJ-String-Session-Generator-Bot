@@ -24,3 +24,30 @@ def set_notified(user_id):
 def delete_user(user_id):
     result = users.delete_one({"_id": user_id})
     return result.deleted_count > 0
+
+
+import sqlite3
+
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""CREATE TABLE IF NOT EXISTS premium_users (
+    user_id INTEGER PRIMARY KEY
+)""")
+conn.commit()
+
+def add_premium(user_id: int):
+    cursor.execute("INSERT OR IGNORE INTO premium_users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+
+def remove_premium(user_id: int):
+    cursor.execute("DELETE FROM premium_users WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+def get_all_premium():
+    cursor.execute("SELECT user_id FROM premium_users")
+    return [row[0] for row in cursor.fetchall()]
+
+def is_premium(user_id: int) -> bool:
+    cursor.execute("SELECT 1 FROM premium_users WHERE user_id = ?", (user_id,))
+    return cursor.fetchone() is not None
