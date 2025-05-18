@@ -26,28 +26,22 @@ def delete_user(user_id):
     return result.deleted_count > 0
 
 
-import sqlite3
+from pymongo import MongoClient
+from config import MONGO_URI
 
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""CREATE TABLE IF NOT EXISTS premium_users (
-    user_id INTEGER PRIMARY KEY
-)""")
-conn.commit()
+client = MongoClient(MONGO_URI)
+db = client["downloader_bot"]
+premium_col = db["premium_users"]
 
 def add_premium(user_id: int):
-    cursor.execute("INSERT OR IGNORE INTO premium_users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
+    if not premium_col.find_one({"_id": user_id}):
+        premium_col.insert_one({"_id": user_id})
 
 def remove_premium(user_id: int):
-    cursor.execute("DELETE FROM premium_users WHERE user_id = ?", (user_id,))
-    conn.commit()
-
-def get_all_premium():
-    cursor.execute("SELECT user_id FROM premium_users")
-    return [row[0] for row in cursor.fetchall()]
+    premium_col.delete_one({"_id": user_id})
 
 def is_premium(user_id: int) -> bool:
-    cursor.execute("SELECT 1 FROM premium_users WHERE user_id = ?", (user_id,))
-    return cursor.fetchone() is not None
+    return premium_col.find_one({"_id": user_id}) is not None
+
+def list_premium_users():
+    return [doc["_id"] for doc in premium_col.find()]
