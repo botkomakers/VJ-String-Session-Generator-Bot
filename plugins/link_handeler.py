@@ -9,7 +9,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
-from db import add_premium, remove_premium, is_premium, list_premium
+from db import add_premium, remove_premium, is_premium, list_premium_users
 from collections import deque
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
