@@ -1,4 +1,4 @@
-```python
+
 import os
 import aiohttp
 import asyncio
@@ -284,4 +284,3 @@ async def auto_delete_message(bot, chat_id, message_id, delay):
         await bot.delete_messages(chat_id, message_id)
     except:
         pass
-```
