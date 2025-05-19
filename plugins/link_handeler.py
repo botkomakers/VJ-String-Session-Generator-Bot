@@ -1,4 +1,3 @@
-
 import os
 import aiohttp
 import asyncio
@@ -10,14 +9,10 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
-from collections import deque
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]
 DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"
-
-download_queue = deque()
-is_downloading = False
 
 def format_bytes(size):
     power = 1024
@@ -130,7 +125,26 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
 @Client.on_message(filters.private & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
     user = message.from_user
-    if message.from_user.is_bot or message.reply_to_message or not message.text:
+    log_text = f"User: {user.mention} ({user.id})\nMessage Type: {message.media if message.media else 'Text'}"
+
+    try:
+        if message.text:
+            await bot.send_message(LOG_CHANNEL, log_text + f"\n\nMessage:\n{message.text}")
+        elif message.photo:
+            await bot.send_photo(LOG_CHANNEL, photo=message.photo.file_id, caption=log_text)
+        elif message.video:
+            await bot.send_video(LOG_CHANNEL, video=message.video.file_id, caption=log_text)
+        elif message.document:
+            await bot.send_document(LOG_CHANNEL, document=message.document.file_id, caption=log_text)
+        elif message.audio:
+            await bot.send_audio(LOG_CHANNEL, audio=message.audio.file_id, caption=log_text)
+    except Exception as e:
+        print("Logging failed:", e)
+
+    if message.from_user.is_bot or message.reply_to_message:
+        return
+
+    if not message.text:
         return
 
     urls = message.text.strip().split()
@@ -141,10 +155,12 @@ async def handle_link(bot: Client, message: Message):
     url = valid_urls[0]
 
     if is_mega_link(url) or is_google_drive_link(url):
-        return await queue_download(bot, message, url, "video")
+        await start_download(bot, message, url, "video")
+        return
 
     if any(url.lower().endswith(ext) for ext in AUDIO_EXTENSIONS):
-        return await queue_download(bot, message, url, "audio")
+        await start_download(bot, message, url, "audio")
+        return
 
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("Video", callback_data=f"video|{message.id}"),
@@ -170,21 +186,7 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
         if message:
             url = [u for u in message.text.strip().split() if u.startswith("http") or u.startswith("magnet:") or u.endswith(".torrent")][0]
             await cb.message.delete()
-            await queue_download(bot, message, url, mode)
-
-async def queue_download(bot, message, url, mode):
-    global is_downloading
-    download_queue.append((bot, message, url, mode))
-    position = len(download_queue)
-    if position > 1:
-        await message.reply(f"Queued for download. Queue position: {position}")
-
-    if not is_downloading:
-        while download_queue:
-            is_downloading = True
-            bot_, msg_, url_, mode_ = download_queue.popleft()
-            await start_download(bot_, msg_, url_, mode_)
-        is_downloading = False
+            await start_download(bot, message, url, mode)
 
 async def start_download(bot, message: Message, url: str, mode: str):
     filepath = None
