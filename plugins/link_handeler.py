@@ -1,3 +1,4 @@
+# ------------------------------ IMPORTS ------------------------------ #
 import os
 import aiohttp
 import asyncio
@@ -10,10 +11,12 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.errors import FloodWait
 from config import LOG_CHANNEL, ADMIN_ID
 
+# --------------------------- FILE TYPE CONSTANTS --------------------------- #
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]
 DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"
 
+# ----------------------------- UTILITY FUNCTIONS ----------------------------- #
 def format_bytes(size):
     power = 1024
     n = 0
@@ -57,30 +60,23 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-def is_google_drive_link(url):
-    return "drive.google.com" in url
-
+# ----------------------------- LINK CHECK FUNCTIONS ----------------------------- #
+def is_google_drive_link(url): return "drive.google.com" in url
 def fix_google_drive_url(url):
-    if "uc?id=" in url or "export=download" in url:
-        return url
+    if "uc?id=" in url or "export=download" in url: return url
     if "/file/d/" in url:
         file_id = url.split("/file/d/")[1].split("/")[0]
         return f"https://drive.google.com/uc?id={file_id}&export=download"
     return url
 
-def is_mega_link(url):
-    return "mega.nz" in url or "mega.co.nz" in url
-
-def is_torrent_or_magnet(url):
-    return url.startswith("magnet:") or url.endswith(".torrent")
-
+def is_mega_link(url): return "mega.nz" in url or "mega.co.nz" in url
+def is_torrent_or_magnet(url): return url.startswith("magnet:") or url.endswith(".torrent")
 def get_cookie_file(url):
-    if "instagram.com" in url:
-        return "cookies/instagram.txt"
-    elif "youtube.com" in url or "youtu.be" in url:
-        return "cookies/youtube.txt"
+    if "instagram.com" in url: return "cookies/instagram.txt"
+    elif "youtube.com" in url or "youtu.be" in url: return "cookies/youtube.txt"
     return None
 
+# ----------------------------- DOWNLOAD FUNCTIONS ----------------------------- #
 def download_mega_file(url, download_dir="/tmp"):
     from mega import Mega
     mega = Mega()
@@ -122,22 +118,13 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
             filename = audio_file
         return filename, info
 
+# ----------------------------- MESSAGE HANDLERS ----------------------------- #
 @Client.on_message(filters.private & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
     user = message.from_user
-    log_text = f"User: {user.mention} ({user.id})\nMessage Type: {message.media if message.media else 'Text'}"
-
     try:
         if message.text:
-            await bot.send_message(LOG_CHANNEL, log_text + f"\n\nMessage:\n{message.text}")
-        elif message.photo:
-            await bot.send_photo(LOG_CHANNEL, photo=message.photo.file_id, caption=log_text)
-        elif message.video:
-            await bot.send_video(LOG_CHANNEL, video=message.video.file_id, caption=log_text)
-        elif message.document:
-            await bot.send_document(LOG_CHANNEL, document=message.document.file_id, caption=log_text)
-        elif message.audio:
-            await bot.send_audio(LOG_CHANNEL, audio=message.audio.file_id, caption=log_text)
+            await bot.send_message(LOG_CHANNEL, f"User: {user.mention} ({user.id})\nMessage:\n{message.text}")
     except Exception as e:
         print("Logging failed:", e)
 
@@ -179,6 +166,12 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
             await cb.answer("Failed to delete message.", show_alert=True)
         return
 
+    elif data.startswith("screenshot|"):
+        _, filepath = data.split("|", 1)
+        await cb.answer("Generating screenshots...", show_alert=False)
+        await generate_screenshots(bot, cb.message, filepath)
+        return
+
     if "|" in data:
         mode, msg_id = data.split("|")
         msg_id = int(msg_id)
@@ -188,6 +181,7 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
             await cb.message.delete()
             await start_download(bot, message, url, mode)
 
+# ----------------------------- MAIN DOWNLOAD LOGIC ----------------------------- #
 async def start_download(bot, message: Message, url: str, mode: str):
     filepath = None
     try:
@@ -215,14 +209,14 @@ async def start_download(bot, message: Message, url: str, mode: str):
             f"Source Link"
         )
 
-        upload_msg = await processing.edit("Uploading...")
         thumb = generate_thumbnail(filepath)
         if not thumb and ext.lower() in AUDIO_EXTENSIONS:
             thumb = DEFAULT_THUMB
 
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Source Link", url=url)],
-            [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
+            [InlineKeyboardButton("🖼 Generate Screenshot", callback_data=f"screenshot|{filepath}"),
+             InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
         ])
 
         if ext.lower() in VIDEO_EXTENSIONS:
@@ -243,14 +237,13 @@ async def start_download(bot, message: Message, url: str, mode: str):
                 reply_markup=buttons
             )
 
-        await upload_msg.delete()
+        await processing.delete()
         asyncio.create_task(auto_delete_message(bot, sent.chat.id, sent.id, 300))
 
-        user = message.from_user
         file_size = format_bytes(os.path.getsize(filepath))
         log_text = (
             f"New Download Event\n\n"
-            f"User: {user.mention} ({user.id})\n"
+            f"User: {message.from_user.mention} ({message.from_user.id})\n"
             f"Link: {url}\n"
             f"File Name: {os.path.basename(filepath)}\n"
             f"Size: {file_size}\n"
@@ -264,7 +257,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
             await bot.send_document(LOG_CHANNEL, document=filepath, caption=log_text)
 
         if any(x in url.lower() for x in ["porn", "sex", "xxx"]):
-            alert = f"⚠️ Porn link detected\nUser: {user.mention} ({user.id})\nLink: {url}"
+            alert = f"⚠️ Porn link detected\nUser: {message.from_user.mention} ({message.from_user.id})\nLink: {url}"
             await bot.send_message(ADMIN_ID, alert)
 
     except Exception as e:
@@ -280,6 +273,32 @@ async def start_download(bot, message: Message, url: str, mode: str):
         except:
             pass
 
+# ----------------------------- SCREENSHOT GENERATION ----------------------------- #
+async def generate_screenshots(bot, message: Message, filepath: str):
+    try:
+        if not os.path.exists(filepath):
+            await message.reply("❌ File not found for generating screenshots.")
+            return
+
+        screenshot_dir = "/tmp/screenshots"
+        os.makedirs(screenshot_dir, exist_ok=True)
+        output_pattern = os.path.join(screenshot_dir, "screenshot-%03d.jpg")
+        cmd = f"ffmpeg -i '{filepath}' -vf fps=1/10 -vframes 4 '{output_pattern}'"
+        os.system(cmd)
+
+        for img_name in sorted(os.listdir(screenshot_dir)):
+            img_path = os.path.join(screenshot_dir, img_name)
+            if os.path.isfile(img_path):
+                await message.reply_photo(photo=img_path)
+
+        for img_name in os.listdir(screenshot_dir):
+            os.remove(os.path.join(screenshot_dir, img_name))
+        os.rmdir(screenshot_dir)
+
+    except Exception as e:
+        await message.reply(f"❌ Failed to generate screenshots:\n**{e}**")
+
+# ----------------------------- AUTO DELETE MESSAGES ----------------------------- #
 async def auto_delete_message(bot, chat_id, message_id, delay):
     await asyncio.sleep(delay)
     try:
