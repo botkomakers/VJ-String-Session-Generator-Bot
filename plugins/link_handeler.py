@@ -33,7 +33,7 @@ def generate_screenshots(file_path, output_dir="/tmp", count=3):
         duration = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS))
         cap.release()
 
-        timestamps = sorted(random.sample(range(1, max(duration - 1, count)), count))
+        timestamps = sorted(random.sample(range(1, max(duration - 1, count)), min(count, duration - 1)))
         screenshots = []
         for i, t in enumerate(timestamps):
             output_path = os.path.join(output_dir, f"ss_{i}.jpg")
@@ -201,6 +201,18 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
             url = [u for u in original.text.strip().split() if u.startswith("http") or u.startswith("magnet:") or u.endswith(".torrent")][0]
             await cb.message.delete()
             await start_download(bot, original, url, mode)
+            return
+
+    if data.startswith("gen_ss|"):
+        filepath = data.split("|", 1)[1]
+        await cb.answer("Generating screenshots...")
+        screenshots = generate_screenshots(filepath)
+        if not screenshots:
+            await cb.message.reply("Failed to generate screenshots.")
+            return
+        for ss in screenshots:
+            await cb.message.reply_photo(photo=ss)
+        await cb.answer()
 
 async def start_download(bot, message: Message, url: str, mode: str):
     filepath = None
@@ -222,7 +234,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
         if not os.path.exists(filepath):
             raise Exception("Download failed or file not found.")
 
-        ext = os.path.splitext(filepath)[1]
+        ext = os.path.splitext(filepath)[1].lower()
         caption = (
             "⚠️ File will be deleted in 5 minutes.\n"
             "Forward to Saved Messages to keep."
@@ -230,15 +242,19 @@ async def start_download(bot, message: Message, url: str, mode: str):
 
         upload_msg = await processing.edit("Uploading...")
 
-        screenshots = generate_screenshots(filepath) if ext.lower() in VIDEO_EXTENSIONS else []
+        screenshots = generate_screenshots(filepath) if ext in VIDEO_EXTENSIONS else []
 
-        buttons = InlineKeyboardMarkup([
+        buttons_list = [
             [InlineKeyboardButton("Source Link", url=url)],
-            [InlineKeyboardButton("Delete Now", callback_data="delete")],
-            [InlineKeyboardButton("Generate Screenshots", callback_data="delete") if screenshots == [] else None]
-        ])
+            [InlineKeyboardButton("Delete Now", callback_data="delete")]
+        ]
 
-        if ext.lower() in VIDEO_EXTENSIONS:
+        if ext in VIDEO_EXTENSIONS and not screenshots:
+            buttons_list.append([InlineKeyboardButton("Generate Screenshots", callback_data=f"gen_ss|{filepath}")])
+
+        buttons = InlineKeyboardMarkup(buttons_list)
+
+        if ext in VIDEO_EXTENSIONS:
             sent = await message.reply_video(
                 video=filepath,
                 caption=caption,
