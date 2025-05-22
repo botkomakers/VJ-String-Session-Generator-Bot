@@ -14,6 +14,7 @@ VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv"]
 AUDIO_EXTENSIONS = [".mp3", ".m4a", ".webm", ".aac", ".ogg"]
 DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"
 
+
 def format_bytes(size):
     power = 1024
     n = 0
@@ -22,6 +23,7 @@ def format_bytes(size):
         size /= power
         n += 1
     return f"{size:.2f} {units[n]}"
+
 
 def generate_screenshots(file_path, output_dir="/tmp", count=3):
     try:
@@ -33,7 +35,7 @@ def generate_screenshots(file_path, output_dir="/tmp", count=3):
         duration = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) / cap.get(cv2.CAP_PROP_FPS))
         cap.release()
 
-        timestamps = sorted(random.sample(range(1, max(duration - 1, count)), min(count, duration - 1)))
+        timestamps = sorted(random.sample(range(1, max(duration - 1, count)), count))
         screenshots = []
         for i, t in enumerate(timestamps):
             output_path = os.path.join(output_dir, f"ss_{i}.jpg")
@@ -47,11 +49,13 @@ def generate_screenshots(file_path, output_dir="/tmp", count=3):
         print("Screenshot Error:", e)
         return []
 
+
 def make_progress_bar(current, total, length=20):
     percent = current / total
     filled_length = int(length * percent)
     bar = '■' * filled_length + '▩' + '□' * (length - filled_length - 1)
     return f"{int(percent * 100)}%\n{bar}"
+
 
 async def progress_callback(current, total, message: Message, action="Downloading"):
     try:
@@ -60,6 +64,7 @@ async def progress_callback(current, total, message: Message, action="Downloadin
         await message.edit_text(text)
     except:
         pass
+
 
 async def auto_cleanup(path="/tmp", max_age=300):
     now = time.time()
@@ -73,8 +78,10 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
+
 def is_google_drive_link(url):
     return "drive.google.com" in url
+
 
 def fix_google_drive_url(url):
     if "uc?id=" in url or "export=download" in url:
@@ -84,11 +91,14 @@ def fix_google_drive_url(url):
         return f"https://drive.google.com/uc?id={file_id}&export=download"
     return url
 
+
 def is_mega_link(url):
     return "mega.nz" in url or "mega.co.nz" in url
 
+
 def is_torrent_or_magnet(url):
     return url.startswith("magnet:") or url.endswith(".torrent")
+
 
 def get_cookie_file(url):
     if "instagram.com" in url:
@@ -97,12 +107,14 @@ def get_cookie_file(url):
         return "cookies/youtube.txt"
     return None
 
+
 def download_mega_file(url, download_dir="/tmp"):
     from mega import Mega
     mega = Mega()
     m = mega.login()
     file = m.download_url(url, dest_path=download_dir)
     return file.name, {"title": file.name, "ext": os.path.splitext(file.name)[1].lstrip(".")}
+
 
 def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False):
     loop = asyncio.new_event_loop()
@@ -137,6 +149,7 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
             os.remove(filename)
             filename = audio_file
         return filename, info
+
 
 @Client.on_message(filters.private & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
@@ -182,6 +195,7 @@ async def handle_link(bot: Client, message: Message):
     ])
     await message.reply("Do you want to download as Video or Audio?", reply_markup=buttons)
 
+
 @Client.on_callback_query()
 async def handle_callback(bot: Client, cb: CallbackQuery):
     data = cb.data
@@ -196,23 +210,12 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
 
     if data in ["video|0", "audio|0"]:
         mode = data.split("|")[0]
-        original = await cb.message.reply_to_message
+        original = cb.message.reply_to_message
         if original:
             url = [u for u in original.text.strip().split() if u.startswith("http") or u.startswith("magnet:") or u.endswith(".torrent")][0]
             await cb.message.delete()
             await start_download(bot, original, url, mode)
-            return
 
-    if data.startswith("gen_ss|"):
-        filepath = data.split("|", 1)[1]
-        await cb.answer("Generating screenshots...")
-        screenshots = generate_screenshots(filepath)
-        if not screenshots:
-            await cb.message.reply("Failed to generate screenshots.")
-            return
-        for ss in screenshots:
-            await cb.message.reply_photo(photo=ss)
-        await cb.answer()
 
 async def start_download(bot, message: Message, url: str, mode: str):
     filepath = None
@@ -234,7 +237,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
         if not os.path.exists(filepath):
             raise Exception("Download failed or file not found.")
 
-        ext = os.path.splitext(filepath)[1].lower()
+        ext = os.path.splitext(filepath)[1]
         caption = (
             "⚠️ File will be deleted in 5 minutes.\n"
             "Forward to Saved Messages to keep."
@@ -242,32 +245,32 @@ async def start_download(bot, message: Message, url: str, mode: str):
 
         upload_msg = await processing.edit("Uploading...")
 
-        screenshots = generate_screenshots(filepath) if ext in VIDEO_EXTENSIONS else []
+        screenshots = generate_screenshots(filepath) if ext.lower() in VIDEO_EXTENSIONS else []
 
-        buttons_list = [
+        buttons = [
             [InlineKeyboardButton("Source Link", url=url)],
             [InlineKeyboardButton("Delete Now", callback_data="delete")]
         ]
 
-        if ext in VIDEO_EXTENSIONS and not screenshots:
-            buttons_list.append([InlineKeyboardButton("Generate Screenshots", callback_data=f"gen_ss|{filepath}")])
+        if ext.lower() in VIDEO_EXTENSIONS and not screenshots:
+            buttons.append([InlineKeyboardButton("Generate Screenshots", callback_data="delete")])
 
-        buttons = InlineKeyboardMarkup(buttons_list)
+        markup = InlineKeyboardMarkup(buttons)
 
-        if ext in VIDEO_EXTENSIONS:
+        if ext.lower() in VIDEO_EXTENSIONS:
             sent = await message.reply_video(
                 video=filepath,
                 caption=caption,
                 reply_to_message_id=message.id,
                 supports_streaming=True,
-                reply_markup=buttons
+                reply_markup=markup
             )
         else:
             sent = await message.reply_document(
                 document=filepath,
                 caption=caption,
                 reply_to_message_id=message.id,
-                reply_markup=buttons
+                reply_markup=markup
             )
 
         await upload_msg.delete()
@@ -286,6 +289,7 @@ async def start_download(bot, message: Message, url: str, mode: str):
             await auto_cleanup()
         except:
             pass
+
 
 async def auto_delete_message(bot, chat_id, message_id, delay):
     await asyncio.sleep(delay)
