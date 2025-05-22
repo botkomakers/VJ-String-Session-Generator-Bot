@@ -24,3 +24,4 @@ mega.py
 nest_asyncio
 gradio>=4.0.0
 ffmpeg-python
+moviepy
