@@ -1,5 +1,3 @@
-# কোড বড়, তাই দুই অংশে দেওয়া হবে। প্রথম অংশ এখানে:
-
 import os
 import aiohttp
 import asyncio
@@ -78,9 +76,6 @@ async def auto_cleanup(path="/tmp", max_age=300):
                 except:
                     pass
 
-# দ্বিতীয় অংশ নিচে...
-
-
 def is_google_drive_link(url):
     return "drive.google.com" in url
 
@@ -148,7 +143,7 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
 
 @Client.on_message(filters.private & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
-    # আগের মতোই...
+    pass  # Placeholder function to prevent IndentationError
 
 @Client.on_callback_query()
 async def handle_callback(bot: Client, cb: CallbackQuery):
