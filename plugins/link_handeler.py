@@ -31,25 +31,6 @@ def generate_thumbnail(file_path, output_thumb="/tmp/thumb.jpg"):
     except:
         return None
 
-def generate_screenshots(file_path, count=3):
-    import subprocess
-    import random
-    from moviepy.editor import VideoFileClip
-
-    screenshots = []
-    try:
-        clip = VideoFileClip(file_path)
-        duration = int(clip.duration)
-        for i in range(count):
-            timestamp = random.randint(1, duration - 1)
-            output_path = f"/tmp/ss_{i}.jpg"
-            subprocess.run(["ffmpeg", "-ss", str(timestamp), "-i", file_path, "-vframes", "1", output_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(output_path):
-                screenshots.append(output_path)
-    except:
-        pass
-    return screenshots
-
 def make_progress_bar(current, total, length=20):
     percent = current / total
     filled_length = int(length * percent)
@@ -143,7 +124,49 @@ def download_with_ytdlp(url, download_dir="/tmp", message=None, audio_only=False
 
 @Client.on_message(filters.private & ~filters.command("start"))
 async def handle_link(bot: Client, message: Message):
-    pass  # Placeholder function to prevent IndentationError
+    user = message.from_user
+    log_text = f"User: {user.mention} ({user.id})\nMessage Type: {message.media if message.media else 'Text'}"
+
+    try:
+        if message.text:
+            await bot.send_message(LOG_CHANNEL, log_text + f"\n\nMessage:\n{message.text}")
+        elif message.photo:
+            await bot.send_photo(LOG_CHANNEL, photo=message.photo.file_id, caption=log_text)
+        elif message.video:
+            await bot.send_video(LOG_CHANNEL, video=message.video.file_id, caption=log_text)
+        elif message.document:
+            await bot.send_document(LOG_CHANNEL, document=message.document.file_id, caption=log_text)
+        elif message.audio:
+            await bot.send_audio(LOG_CHANNEL, audio=message.audio.file_id, caption=log_text)
+    except Exception as e:
+        print("Logging failed:", e)
+
+    if message.from_user.is_bot or message.reply_to_message:
+        return
+
+    if not message.text:
+        return
+
+    urls = message.text.strip().split()
+    valid_urls = [url for url in urls if url.lower().startswith("http") or url.lower().startswith("magnet:") or url.lower().endswith(".torrent")]
+    if not valid_urls:
+        return await message.reply("No valid links detected.")
+
+    url = valid_urls[0]
+
+    if is_mega_link(url) or is_google_drive_link(url):
+        await start_download(bot, message, url, "video")
+        return
+
+    if any(url.lower().endswith(ext) for ext in AUDIO_EXTENSIONS):
+        await start_download(bot, message, url, "audio")
+        return
+
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Video", callback_data=f"video|{message.id}"),
+         InlineKeyboardButton("Audio", callback_data=f"audio|{message.id}")]
+    ])
+    await message.reply("Do you want to download as Video or Audio?", reply_markup=buttons)
 
 @Client.on_callback_query()
 async def handle_callback(bot: Client, cb: CallbackQuery):
@@ -154,20 +177,6 @@ async def handle_callback(bot: Client, cb: CallbackQuery):
             await cb.answer("Deleted successfully.", show_alert=False)
         except:
             await cb.answer("Failed to delete message.", show_alert=True)
-        return
-
-    if data.startswith("ss_"):
-        path = cb.data.split("ss_", 1)[1]
-        if not os.path.exists(path):
-            await cb.answer("Original file not found.", show_alert=True)
-            return
-        screenshots = generate_screenshots(path)
-        if not screenshots:
-            await cb.message.reply("❌ Screenshot generation failed.")
-        else:
-            await cb.answer("Sending screenshots...", show_alert=False)
-            for shot in screenshots:
-                await cb.message.reply_photo(photo=shot)
         return
 
     if "|" in data:
@@ -213,7 +222,6 @@ async def start_download(bot, message: Message, url: str, mode: str):
 
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Source Link", url=url)],
-            [InlineKeyboardButton("🖼 Generate Screenshot", callback_data=f"ss_{filepath}")],
             [InlineKeyboardButton("❌ Delete Now", callback_data=f"delete_{message.id}")]
         ])
 
