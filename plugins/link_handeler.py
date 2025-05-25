@@ -286,3 +286,82 @@ async def auto_delete_message(bot, chat_id, message_id, delay):
         await bot.delete_messages(chat_id, message_id)
     except:
         pass
+
+
+
+
+
+from pyrogram import Client, filters
+from pyrogram.types import Message
+import re
+import os
+import asyncio
+import subprocess
+
+@Client.on_message(filters.command("leech") & filters.private)
+async def leech_command_handler(bot: Client, message: Message):
+    text = message.text
+    args = text.split()
+    
+    if len(args) < 2:
+        return await message.reply("Please provide a link.\n\nExample:\n`/leech https://example.com/video.mp4 -ss 5`", quote=True)
+    
+    url = args[1]
+    screenshot_count = 3  # default value
+    ss_match = re.search(r"-ss\s*(\d+)", text)
+    if ss_match:
+        screenshot_count = int(ss_match.group(1))
+
+    temp_dir = "/tmp/leech"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    status = await message.reply("Downloading video...", quote=True)
+
+    # Download with yt_dlp
+    try:
+        output_path = os.path.join(temp_dir, "%(title)s.%(ext)s")
+        ydl_opts = {
+            "outtmpl": output_path,
+            "format": "bestvideo+bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+
+        await status.edit("Generating screenshots...")
+
+        duration_cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"{filename}\""
+        duration = float(subprocess.check_output(duration_cmd, shell=True).decode().strip())
+        interval = duration // (screenshot_count + 1)
+
+        screenshots = []
+        for i in range(1, screenshot_count + 1):
+            timestamp = int(i * interval)
+            ss_path = os.path.join(temp_dir, f"screenshot_{i}.jpg")
+            cmd = f"ffmpeg -ss {timestamp} -i \"{filename}\" -vframes 1 -q:v 2 \"{ss_path}\" -y"
+            subprocess.call(cmd, shell=True)
+            if os.path.exists(ss_path):
+                screenshots.append(ss_path)
+
+        if not screenshots:
+            return await status.edit("❌ Failed to generate screenshots.")
+
+        await status.delete()
+        for ss in screenshots:
+            await message.reply_photo(ss)
+
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}")
+        traceback.print_exc()
+    finally:
+        # Clean up
+        try:
+            for f in os.listdir(temp_dir):
+                os.remove(os.path.join(temp_dir, f))
+            os.rmdir(temp_dir)
+        except:
+            pass
