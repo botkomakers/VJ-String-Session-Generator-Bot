@@ -1,42 +1,48 @@
 import os
 import asyncio
-import time
-import datetime
-import traceback
+import yt_dlp
 import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import LOG_CHANNEL, ADMIN_ID
-import yt_dlp
+import datetime
 
-VIDEO_EXTS = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
-DEFAULT_THUMB = "https://i.ibb.co/Xk4Hbg8h/photo-2025-05-07-15-52-21-7505459490108473348.jpg"
+VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
 
 def format_bytes(size):
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
+    power = 1024
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units) - 1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
 
-def generate_screenshots(video_path, count=3):
-    duration_cmd = ["ffprobe", "-v", "error", "-show_entries",
-                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-    duration = float(subprocess.check_output(duration_cmd).decode().strip())
-    interval = duration / (count + 1)
-    
-    screenshots = []
-    for i in range(1, count + 1):
-        timestamp = str(datetime.timedelta(seconds=int(i * interval)))
-        out_path = f"/tmp/ss_{i}.jpg"
-        subprocess.run(["ffmpeg", "-ss", timestamp, "-i", video_path, "-vframes", "1", "-q:v", "2", out_path],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(out_path):
-            screenshots.append(out_path)
-    return screenshots
+def generate_screenshots(file_path, count=3):
+    try:
+        duration_cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        ]
+        result = subprocess.run(duration_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        duration = float(result.stdout)
+        intervals = [int(duration * (i + 1) / (count + 1)) for i in range(count)]
 
-async def download_with_yt(url, msg: Message):
+        shots = []
+        for i, sec in enumerate(intervals):
+            output_path = f"/tmp/ss_{i}.jpg"
+            subprocess.run([
+                "ffmpeg", "-ss", str(sec), "-i", file_path,
+                "-frames:v", "1", "-q:v", "2", output_path
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(output_path):
+                shots.append(output_path)
+        return shots
+    except:
+        return []
+
+def download_with_yt(url, msg: Message):
     download_dir = "/tmp"
-    loop = asyncio.get_event_loop()
 
     def hook(d):
         if d['status'] == 'downloading':
@@ -45,7 +51,7 @@ async def download_with_yt(url, msg: Message):
             percent = int(downloaded * 100 / total)
             text = f"Downloading... {percent}%"
             try:
-                asyncio.run_coroutine_threadsafe(msg.edit_text(text), loop)
+                asyncio.run_coroutine_threadsafe(msg.edit_text(text), asyncio.get_event_loop())
             except:
                 pass
 
@@ -63,76 +69,72 @@ async def download_with_yt(url, msg: Message):
         return file_path, info
 
 @Client.on_message(filters.command("leech") & filters.private)
-async def leech_handler(bot: Client, message: Message):
-    if len(message.command) < 2:
-        return await message.reply("Usage: `/leech <url> -ss <screenshot_count>`", quote=True)
-
+async def leech_handler(bot, message: Message):
     text = message.text.split()
+    if len(text) < 2:
+        return await message.reply("Usage: /leech {url} -ss {count}")
+
+    url = text[1]
     try:
-        url = text[1]
         ss_count = 3  # default
         if "-ss" in text:
-            idx = text.index("-ss")
-            ss_count = int(text[idx + 1])
-    except Exception as e:
-        return await message.reply("Invalid command format.\nUsage: `/leech <url> -ss <count>`")
+            ss_index = text.index("-ss")
+            ss_count = int(text[ss_index + 1])
+    except:
+        ss_count = 3
 
-    status_msg = await message.reply("Starting download...")
+    status_msg = await message.reply("Downloading...")
 
     try:
         filepath, info = await asyncio.to_thread(download_with_yt, url, status_msg)
-        ext = os.path.splitext(filepath)[1].lower()
-        if not os.path.exists(filepath) or ext not in VIDEO_EXTS:
-            return await status_msg.edit("Invalid or unsupported file.")
+        if not os.path.exists(filepath):
+            return await status_msg.edit("Download failed.")
 
         await status_msg.edit("Generating screenshots...")
         screenshots = generate_screenshots(filepath, ss_count)
 
-        media_group = []
-        for ss in screenshots:
-            if os.path.exists(ss):
-                await message.reply_photo(photo=ss)
+        caption = f"**File:** `{os.path.basename(filepath)}`\n**Size:** `{format_bytes(os.path.getsize(filepath))}`"
 
-        caption = f"Downloaded from: {url}\n\n**File:** `{os.path.basename(filepath)}`\n**Size:** {format_bytes(os.path.getsize(filepath))}"
+        for shot in screenshots:
+            await message.reply_photo(photo=shot)
+
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Delete", callback_data=f"delete_{message.id}")],
-            [InlineKeyboardButton("Source Link", url=url)]
+            [InlineKeyboardButton("Download Again", url=url)],
+            [InlineKeyboardButton("Delete", callback_data="delete_me")]
         ])
 
-        await message.reply_video(
-            video=filepath,
+        await message.reply_document(
+            document=filepath,
             caption=caption,
-            supports_streaming=True,
-            reply_markup=buttons,
-            thumb=DEFAULT_THUMB
+            reply_markup=buttons
         )
 
         await status_msg.delete()
 
-        await bot.send_message(LOG_CHANNEL, f"User: {message.from_user.mention} ({message.from_user.id})\nLeech link: {url}")
-
-        asyncio.create_task(auto_delete(filepath, screenshots, delay=300))
+        log_text = (
+            f"Leech Complete\nUser: {message.from_user.mention} ({message.from_user.id})\n"
+            f"File: {os.path.basename(filepath)}\nSize: {format_bytes(os.path.getsize(filepath))}\n"
+            f"URL: {url}\nTime: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        await bot.send_message(LOG_CHANNEL, log_text)
 
     except Exception as e:
-        traceback.print_exc()
         await status_msg.edit(f"Failed: {e}")
 
-async def auto_delete(video, screenshots, delay=300):
-    await asyncio.sleep(delay)
-    try:
-        if os.path.exists(video):
-            os.remove(video)
-        for s in screenshots:
-            if os.path.exists(s):
-                os.remove(s)
-    except:
-        pass
-
-@Client.on_callback_query()
-async def delete_cb(bot: Client, cb):
-    if cb.data.startswith("delete_"):
+    finally:
         try:
-            await cb.message.delete()
-            await cb.answer("Deleted.", show_alert=False)
+            if filepath and os.path.exists(filepath):
+                os.remove(filepath)
+            for f in os.listdir("/tmp"):
+                if f.startswith("ss_") and f.endswith(".jpg"):
+                    os.remove(os.path.join("/tmp", f))
         except:
-            await cb.answer("Failed to delete.", show_alert=True)
+            pass
+
+@Client.on_callback_query(filters.regex("delete_me"))
+async def delete_callback(bot, query):
+    try:
+        await query.message.delete()
+        await query.answer("Deleted.", show_alert=False)
+    except:
+        await query.answer("Can't delete.", show_alert=True)
