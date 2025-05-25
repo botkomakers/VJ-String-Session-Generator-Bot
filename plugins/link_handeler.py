@@ -2,48 +2,46 @@ import os
 import asyncio
 import yt_dlp
 import subprocess
-import datetime
+from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
-)
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from config import LOG_CHANNEL, ADMIN_ID
 
 VIDEO_EXTENSIONS = [".mp4", ".mkv", ".mov", ".avi", ".webm"]
 
 def format_bytes(size):
-    power = 1024
-    n = 0
-    units = ['B', 'KB', 'MB', 'GB', 'TB']
-    while size > power and n < len(units) - 1:
-        size /= power
-        n += 1
-    return f"{size:.2f} {units[n]}"
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f"{size:.2f}{unit}"
+        size /= 1024
+    return f"{size:.2f}TB"
 
-def generate_screenshots(file_path, count=3):
+def generate_screenshots(file_path: str, count: int = 3):
     try:
-        duration_cmd = [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", file_path
-        ]
-        result = subprocess.run(duration_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
         duration = float(result.stdout)
         intervals = [int(duration * (i + 1) / (count + 1)) for i in range(count)]
-
         shots = []
+
         for i, sec in enumerate(intervals):
             output_path = f"/tmp/ss_{i}.jpg"
             subprocess.run([
                 "ffmpeg", "-ss", str(sec), "-i", file_path,
                 "-frames:v", "1", "-q:v", "2", output_path
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
             if os.path.exists(output_path):
                 shots.append(output_path)
+
         return shots
     except:
         return []
 
-def download_with_yt(url, msg: Message):
+def download_with_yt(url: str, update_msg: Message):
     download_dir = "/tmp"
 
     def hook(d):
@@ -51,9 +49,11 @@ def download_with_yt(url, msg: Message):
             total = d.get("total_bytes") or d.get("total_bytes_estimate", 1)
             downloaded = d.get("downloaded_bytes", 0)
             percent = int(downloaded * 100 / total)
-            text = f"Downloading... {percent}%"
             try:
-                asyncio.run_coroutine_threadsafe(msg.edit_text(text), asyncio.get_event_loop())
+                asyncio.run_coroutine_threadsafe(
+                    update_msg.edit(f"Downloading... {percent}%"),
+                    asyncio.get_event_loop()
+                )
             except:
                 pass
 
@@ -70,86 +70,61 @@ def download_with_yt(url, msg: Message):
         file_path = ydl.prepare_filename(info)
         return file_path, info
 
-@Client.on_message(filters.command("leech") & (filters.private | filters.group))
-async def leech_handler(bot, message: Message):
-    text = message.text.split()
-    if len(text) < 2:
-        return await message.reply("Usage: /leech {url} -ss {count}")
+@Client.on_message(filters.command("leech") & (filters.group | filters.private))
+async def leech_handler(bot: Client, message: Message):
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.reply("Usage: `/leech {url} -ss {count}`", quote=True)
 
-    url = text[1]
-    try:
-        ss_count = 3
-        if "-ss" in text:
-            ss_index = text.index("-ss")
-            ss_count = int(text[ss_index + 1])
-    except:
-        ss_count = 3
-
-    status_msg = await message.reply("Downloading...")
-
-    filepath = None
-    try:
-        filepath, info = await asyncio.to_thread(download_with_yt, url, status_msg)
-        if not os.path.exists(filepath):
-            return await status_msg.edit("Download failed.")
-
-        await status_msg.edit("Generating screenshots...")
-        screenshots = generate_screenshots(filepath, ss_count)
-
-        # Send screenshots to user's DM
+    url = args[1]
+    ss_count = 3
+    if "-ss" in args:
         try:
-            for shot in screenshots:
-                await bot.send_photo(chat_id=message.from_user.id, photo=shot)
+            idx = args.index("-ss")
+            ss_count = int(args[idx + 1])
         except:
             pass
 
-        # Send screenshots to log channel
-        media_group = [InputMediaPhoto(media=img) for img in screenshots[:3]]
-        media_msg_ids = []
+    status = await message.reply("Starting download...")
 
+    try:
+        filepath, info = await asyncio.to_thread(download_with_yt, url, status)
+        if not os.path.exists(filepath):
+            return await status.edit("Download failed.")
+
+        await status.edit("Generating screenshots...")
+        screenshots = generate_screenshots(filepath, ss_count)
+
+        filename = os.path.basename(filepath)
+        filesize = os.path.getsize(filepath)
+        user_id = message.from_user.id
+
+        media_group = [InputMediaPhoto(media=img) for img in screenshots[:10]]
+        first_msg = None
         if media_group:
-            sent_msgs = await bot.send_media_group(chat_id=LOG_CHANNEL, media=media_group)
-            media_msg_ids = [msg.message_id for msg in sent_msgs]
+            log_msg = await bot.send_media_group(chat_id=LOG_CHANNEL, media=media_group)
+            first_msg = log_msg[0] if log_msg else None
 
-        screenshot_link = f"https://t.me/{(await bot.get_chat(LOG_CHANNEL)).username}/{media_msg_ids[0]}" if media_msg_ids else None
+            try:
+                for ss in screenshots:
+                    await bot.send_photo(user_id, ss)
+            except:
+                pass
 
-        caption = f"**File:** `{os.path.basename(filepath)}`\n**Size:** `{format_bytes(os.path.getsize(filepath))}`"
+            log_button = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🖼 View Screenshots", url=first_msg.link if first_msg else "https://t.me")
+            ]])
 
-        buttons = [
-            [InlineKeyboardButton("🔐 Source Link", url=url)],
-            [InlineKeyboardButton("🗑 Delete", callback_data="delete_me")]
-        ]
+            await message.reply(
+                "Your requested screenshots have been sent to your DM.\n"
+                "Click the button below to view them in the log channel.",
+                reply_markup=log_button
+            )
 
-        if screenshot_link:
-            buttons.append([
-                InlineKeyboardButton("🖼 View Screenshots", url=screenshot_link)
-            ])
-
-        await message.reply_document(
-            document=filepath,
-            caption=caption,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-
-        await status_msg.delete()
-
-        log_caption = (
-            f"{info.get('title')}\n"
-            f"Size: {format_bytes(os.path.getsize(filepath))}\n"
-            f"Elapsed: 1m\n"
-            f"Mode: #Leech | #Aria2\n"
-            f"Total Files: 1\n"
-            f"By: @{message.from_user.username or message.from_user.id}\n"
-            f"\nFile(s) have been Sent.\nAccess via Links..."
-        )
-
-        await bot.send_message(
-            chat_id=LOG_CHANNEL,
-            text=log_caption
-        )
+        await status.delete()
 
     except Exception as e:
-        await status_msg.edit(f"Failed: {e}")
+        await status.edit(f"❌ Failed: `{e}`")
 
     finally:
         try:
@@ -160,11 +135,3 @@ async def leech_handler(bot, message: Message):
                     os.remove(os.path.join("/tmp", f))
         except:
             pass
-
-@Client.on_callback_query(filters.regex("delete_me"))
-async def delete_callback(bot, query):
-    try:
-        await query.message.delete()
-        await query.answer("Deleted.", show_alert=False)
-    except:
-        await query.answer("Can't delete.", show_alert=True)
